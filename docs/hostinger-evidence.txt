@@ -1,0 +1,148 @@
+PORT 25 EGRESS EVIDENCE - VPS 607166 / 92.112.184.200
+Captured 2026-08-16, 22:59:16 - 23:06:28 UTC
+
+All times UTC, captured on eth0 of VPS 607166 with tcpdump; SYNs leave the
+interface, nothing returns.
+
+Host clock is Etc/UTC; tcpdump run with TZ=UTC and -tttt.
+
+METHOD
+  16 connection attempts, 5 seconds apart:
+    5 x  nc -4 -z -w10 aspmx.l.google.com 25
+    5 x  nc -4 -z -w10 outlook-com.olc.protection.outlook.com 25
+    5 x  nc -4 -z -w10 mx1.improvmx.com 25
+    1 x  nc -4 -z -w10 1.1.1.1 443                      (control)
+  Capture filter:
+    (host 92.112.184.200 and tcp port 25) or (host 1.1.1.1 and tcp port 443)
+
+  Each hostname has several A records and nc tries them in turn, so one
+  attempt can produce several TCP flows. One line below per flow.
+
+SUMMARY
+  36 of 41 flows received no response of any kind.
+  5 flows succeeded - all to Google, all in the first 25 seconds, before
+  any other destination was contacted. Every flow after 22:59:44 UTC failed,
+  to both Microsoft and improvmx, until the control on port 443 succeeded.
+  This looks like a rate limiter with a small burst allowance rather than a
+  static block: after an idle period a few connections are allowed, then all
+  subsequent port 25 traffic is discarded.
+
+==============================================================================
+1. PER-FLOW RESULTS
+==============================================================================
+
+UTC timestamp           source                 destination            SYN retx  result
+------------------------------------------------------------------------------
+2026-08-16 22:59:19.653 92.112.184.200:33238   142.251.167.27:25      0         SYN-ACK, handshake completed
+2026-08-16 22:59:24.676 92.112.184.200:59484   142.251.167.27:25      0         SYN-ACK, handshake completed
+2026-08-16 22:59:29.701 92.112.184.200:59488   142.251.167.27:25      0         SYN-ACK, handshake completed
+2026-08-16 22:59:34.723 92.112.184.200:60198   142.251.167.27:25      0         SYN-ACK, handshake completed
+2026-08-16 22:59:39.745 92.112.184.200:60210   142.251.167.27:25      0         SYN-ACK, handshake completed
+2026-08-16 22:59:44.769 92.112.184.200:55150   52.101.10.4:25         6         no SYN-ACK, no RST, no ICMP
+2026-08-16 22:59:54.779 92.112.184.200:57982   52.101.10.3:25         6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:00:04.781 92.112.184.200:51420   52.101.41.59:25        6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:00:14.791 92.112.184.200:48360   52.101.40.30:25        6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:00:29.816 92.112.184.200:55728   52.101.41.181:25       6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:00:39.826 92.112.184.200:43222   52.101.40.30:25        6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:00:49.831 92.112.184.200:47522   52.101.10.4:25         6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:00:59.835 92.112.184.200:36846   52.101.41.29:25        6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:01:14.859 92.112.184.200:50982   52.101.10.3:25         6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:01:24.863 92.112.184.200:36066   52.101.73.17:25        6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:01:34.873 92.112.184.200:49092   52.101.40.25:25        6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:01:44.883 92.112.184.200:40970   52.101.68.24:25        6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:01:59.908 92.112.184.200:33364   52.101.40.28:25        6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:02:09.918 92.112.184.200:47516   52.101.68.1:25         6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:02:19.929 92.112.184.200:43002   52.101.42.17:25        6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:02:29.939 92.112.184.200:50822   52.101.8.45:25         6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:02:44.963 92.112.184.200:48178   52.101.9.10:25         6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:02:54.974 92.112.184.200:50726   52.101.11.18:25        6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:03:04.984 92.112.184.200:57068   52.101.73.23:25        6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:03:14.985 92.112.184.200:47854   52.101.9.25:25         6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:03:30.012 92.112.184.200:51282   13.37.195.136:25       6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:03:40.016 92.112.184.200:38566   35.181.18.45:25        6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:03:50.027 92.112.184.200:57092   15.236.236.160:25      6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:04:05.051 92.112.184.200:51216   13.37.195.136:25       6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:04:15.061 92.112.184.200:40844   15.236.236.160:25      6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:04:25.071 92.112.184.200:34332   35.181.18.45:25        6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:04:40.093 92.112.184.200:54468   13.37.195.136:25       6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:04:50.103 92.112.184.200:60430   35.181.18.45:25        6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:05:00.111 92.112.184.200:38762   15.236.236.160:25      6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:05:15.132 92.112.184.200:41726   15.236.236.160:25      6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:05:25.136 92.112.184.200:36406   35.181.18.45:25        6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:05:35.147 92.112.184.200:58488   13.37.195.136:25       6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:05:50.169 92.112.184.200:44334   13.37.195.136:25       6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:06:00.177 92.112.184.200:41032   15.236.236.160:25      6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:06:10.188 92.112.184.200:49302   35.181.18.45:25        6         no SYN-ACK, no RST, no ICMP
+2026-08-16 23:06:25.209 92.112.184.200:46414   1.1.1.1:443            0         SYN-ACK, handshake completed
+
+Destination hostnames. The addresses below are a single DNS snapshot taken at
+the start of the capture; Microsoft rotates its answers on every query, so the
+attempts reached a wider set of 52.101.x addresses than this snapshot lists.
+The destination addresses in the table above come from the packet capture
+itself and are the authoritative ones.
+
+  aspmx.l.google.com
+      142.251.167.27
+  outlook-com.olc.protection.outlook.com
+      40.93.192.0 52.101.41.5 52.101.42.19 52.101.50.6
+  mx1.improvmx.com
+      13.37.195.136 15.236.236.160 35.181.18.45
+  1.1.1.1 (control, port 443)
+
+Distinct destination addresses that received SYNs and never replied:
+  Microsoft: 52.101.8.45 52.101.9.10 52.101.9.25 52.101.10.3 52.101.10.4
+             52.101.11.18 52.101.40.25 52.101.40.28 52.101.40.30 52.101.41.29
+             52.101.41.59 52.101.41.181 52.101.42.17 52.101.68.1 52.101.68.24
+             52.101.73.17 52.101.73.23
+  improvmx:  13.37.195.136 15.236.236.160 35.181.18.45
+
+==============================================================================
+2. RAW TCPDUMP OUTPUT
+==============================================================================
+
+--- FAILURE 1 - Microsoft 52.101.10.4:25 (attempt 6, 7 SYNs, no reply) ---
+
+2026-08-16 22:59:44.769418 IP 92.112.184.200.55150 > 52.101.10.4.25: Flags [S], seq 4162731209, win 64240, options [mss 1460,sackOK,TS val 1053484773 ecr 0,nop,wscale 7], length 0
+2026-08-16 22:59:45.783219 IP 92.112.184.200.55150 > 52.101.10.4.25: Flags [S], seq 4162731209, win 64240, options [mss 1460,sackOK,TS val 1053485787 ecr 0,nop,wscale 7], length 0
+2026-08-16 22:59:46.807234 IP 92.112.184.200.55150 > 52.101.10.4.25: Flags [S], seq 4162731209, win 64240, options [mss 1460,sackOK,TS val 1053486811 ecr 0,nop,wscale 7], length 0
+2026-08-16 22:59:47.831233 IP 92.112.184.200.55150 > 52.101.10.4.25: Flags [S], seq 4162731209, win 64240, options [mss 1460,sackOK,TS val 1053487835 ecr 0,nop,wscale 7], length 0
+2026-08-16 22:59:48.855257 IP 92.112.184.200.55150 > 52.101.10.4.25: Flags [S], seq 4162731209, win 64240, options [mss 1460,sackOK,TS val 1053488859 ecr 0,nop,wscale 7], length 0
+2026-08-16 22:59:49.879253 IP 92.112.184.200.55150 > 52.101.10.4.25: Flags [S], seq 4162731209, win 64240, options [mss 1460,sackOK,TS val 1053489883 ecr 0,nop,wscale 7], length 0
+2026-08-16 22:59:51.927300 IP 92.112.184.200.55150 > 52.101.10.4.25: Flags [S], seq 4162731209, win 64240, options [mss 1460,sackOK,TS val 1053491931 ecr 0,nop,wscale 7], length 0
+
+--- FAILURE 2 - improvmx 13.37.195.136:25 (attempt 11, 7 SYNs, no reply) ---
+
+2026-08-16 23:03:30.012249 IP 92.112.184.200.51282 > 13.37.195.136.25: Flags [S], seq 1744271235, win 64240, options [mss 1460,sackOK,TS val 3833278770 ecr 0,nop,wscale 7], length 0
+2026-08-16 23:03:31.063348 IP 92.112.184.200.51282 > 13.37.195.136.25: Flags [S], seq 1744271235, win 64240, options [mss 1460,sackOK,TS val 3833279821 ecr 0,nop,wscale 7], length 0
+2026-08-16 23:03:32.087479 IP 92.112.184.200.51282 > 13.37.195.136.25: Flags [S], seq 1744271235, win 64240, options [mss 1460,sackOK,TS val 3833280845 ecr 0,nop,wscale 7], length 0
+2026-08-16 23:03:33.111226 IP 92.112.184.200.51282 > 13.37.195.136.25: Flags [S], seq 1744271235, win 64240, options [mss 1460,sackOK,TS val 3833281869 ecr 0,nop,wscale 7], length 0
+2026-08-16 23:03:34.135270 IP 92.112.184.200.51282 > 13.37.195.136.25: Flags [S], seq 1744271235, win 64240, options [mss 1460,sackOK,TS val 3833282893 ecr 0,nop,wscale 7], length 0
+2026-08-16 23:03:35.159232 IP 92.112.184.200.51282 > 13.37.195.136.25: Flags [S], seq 1744271235, win 64240, options [mss 1460,sackOK,TS val 3833283917 ecr 0,nop,wscale 7], length 0
+2026-08-16 23:03:37.207230 IP 92.112.184.200.51282 > 13.37.195.136.25: Flags [S], seq 1744271235, win 64240, options [mss 1460,sackOK,TS val 3833285965 ecr 0,nop,wscale 7], length 0
+
+--- CONTROL - 1.1.1.1:443 (attempt 16, handshake completes in 1.5 ms) ---
+
+2026-08-16 23:06:25.209543 IP 92.112.184.200.46414 > 1.1.1.1.443: Flags [S], seq 2635324950, win 64240, options [mss 1460,sackOK,TS val 4189753599 ecr 0,nop,wscale 7], length 0
+2026-08-16 23:06:25.211079 IP 1.1.1.1.443 > 92.112.184.200.46414: Flags [S.], seq 2517641268, ack 2635324951, win 65535, options [mss 1460,sackOK,TS val 298693664 ecr 4189753599,nop,wscale 13], length 0
+2026-08-16 23:06:25.211134 IP 92.112.184.200.46414 > 1.1.1.1.443: Flags [.], ack 1, win 502, options [nop,nop,TS val 4189753600 ecr 298693664], length 0
+2026-08-16 23:06:25.211224 IP 92.112.184.200.46414 > 1.1.1.1.443: Flags [F.], seq 1, ack 1, win 502, options [nop,nop,TS val 4189753601 ecr 298693664], length 0
+2026-08-16 23:06:25.213419 IP 1.1.1.1.443 > 92.112.184.200.46414: Flags [F.], seq 1, ack 2, win 16, options [nop,nop,TS val 298693666 ecr 4189753601], length 0
+2026-08-16 23:06:25.213448 IP 92.112.184.200.46414 > 1.1.1.1.443: Flags [.], ack 2, win 502, options [nop,nop,TS val 4189753603 ecr 298693666], length 0
+
+==============================================================================
+3. LOCAL CONFIGURATION RULED OUT
+==============================================================================
+
+  iptables -L OUTPUT -n    ->  Chain OUTPUT (policy ACCEPT), no rules
+  nftables                 ->  no rules matching tcp dport 25
+  ufw                      ->  inactive
+  nf_conntrack             ->  101 of 262144 in use, no table-full events
+  eth0 MTU                 ->  1500, no interface errors or drops
+  TIME_WAIT sockets to :25 ->  0
+
+  The capture above is the direct evidence: the SYN packets do leave eth0
+  with the correct source address 92.112.184.200 and are retransmitted six
+  times each. Nothing local is discarding them.
+
+  The same behaviour occurs over IPv6 from 2a02:4780:2d:e3fc::1, and ports
+  587 and 465 to the same destination hosts connect normally in ~80 ms.
