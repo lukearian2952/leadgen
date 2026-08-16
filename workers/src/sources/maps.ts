@@ -97,25 +97,81 @@ export class MapsSource {
   }
 
   /** Poll to completion. Returns the terminal status. */
-  async waitFor(jobId: string, maxMs: number, pollMs = 10_000): Promise<string> {
+  /**
+   * Poll to completion, requiring an actual payload.
+   *
+   * `status` is not sufficient on its own. gosom flips a job to `ok` while it is
+   * still scraping, and `/download` returns 0 bytes at that moment — so the
+   * previous version returned `ok`, downloaded nothing, and reported
+   * `returned: 0` for a run that had in fact found the right businesses. The
+   * status is a necessary condition, never a sufficient one.
+   *
+   * So: `ok` only ends the wait once the download is non-empty. `failed` ends it
+   * immediately — there is nothing to wait for. Everything else keeps polling to
+   * the cap.
+   */
+  async waitFor(jobId: string, maxMs: number, pollMs = 10_000): Promise<MapsWaitResult> {
     const deadline = Date.now() + maxMs
     let last = ''
+    let sawOkButEmpty = false
+
     while (Date.now() < deadline) {
       last = await this.status(jobId)
-      if (last === 'ok' || last === 'failed') return last
+
+      if (last === 'failed') return { status: 'failed', bytes: 0, okButEmptyPolls: 0 }
+
+      if (last === 'ok') {
+        const body = await this.rawResults(jobId)
+        if (body.trim().length > 0) {
+          return { status: 'ok', bytes: body.length, okButEmptyPolls: 0, body }
+        }
+        // Reported complete with nothing to show for it: keep waiting.
+        sawOkButEmpty = true
+      }
+
       await new Promise(r => setTimeout(r, pollMs))
     }
-    return last || 'timeout'
+
+    // Distinguish "never finished" from "claimed to finish but produced
+    // nothing" — they need different responses and the old code conflated them.
+    return {
+      status: sawOkButEmpty ? 'ok_but_empty' : (last ? 'timeout' : 'unknown'),
+      bytes: 0,
+      okButEmptyPolls: sawOkButEmpty ? 1 : 0,
+    }
   }
 
-  async results(jobId: string): Promise<MapsBusiness[]> {
+  /** The raw CSV body, or '' when the scraper has nothing yet. */
+  async rawResults(jobId: string): Promise<string> {
     const res = await httpFetch(
       new URL(`/api/v1/jobs/${jobId}/download`, this.baseUrl),
       { signal: AbortSignal.timeout(120_000) },
     )
+    // A not-yet-ready download is an expected state during polling, not an
+    // error: treat it as empty and let the caller keep waiting.
+    if (res.status === 404 || res.status === 204) return ''
     if (!res.ok) throw new Error(`maps-scraper download -> HTTP ${res.status}`)
-    return parseCsv(await res.text())
+    return await res.text()
   }
+
+  async results(jobId: string): Promise<MapsBusiness[]> {
+    return parseCsv(await this.rawResults(jobId))
+  }
+}
+
+/** Outcome of waiting on a scrape job. */
+export interface MapsWaitResult {
+  /**
+   * ok            — finished with a non-empty payload
+   * failed        — the scraper reported failure
+   * ok_but_empty  — reported complete, still empty when the cap expired
+   * timeout       — never reported complete
+   */
+  status: 'ok' | 'failed' | 'ok_but_empty' | 'timeout' | 'unknown'
+  bytes: number
+  okButEmptyPolls: number
+  /** Carried through so a successful wait does not re-download. */
+  body?: string
 }
 
 // ── CSV ──────────────────────────────────────────────────────────────────────

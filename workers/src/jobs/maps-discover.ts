@@ -11,7 +11,7 @@
 import type { Task } from 'graphile-worker'
 import { wrapTask, jobKey } from './wrap.js'
 import type { TaskDeps } from './index.js'
-import { MapsSource, type MapsBusiness } from '../sources/maps.js'
+import { MapsSource, parseCsv, type MapsBusiness } from '../sources/maps.js'
 import { resolveLocationScope, checkInScope } from '../lib/geo.js'
 import { resolveNicheFilter, checkNicheTypes } from '../lib/niche-types.js'
 import { extractDomain, isJunkDomain } from '../lib/identity.js'
@@ -62,13 +62,21 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
       { depth: 10, maxSeconds: 1500 },
     )
 
-    const status = await source.waitFor(jobId, 25 * 60_000)
-    if (status !== 'ok') {
-      throw new Error(`maps job ${jobId} ended ${status}`)
+    // 20 minute cap, per the brief. The wait now requires a non-empty download,
+    // so `ok` here genuinely means there is something to parse.
+    const wait = await source.waitFor(jobId, 20 * 60_000)
+    if (wait.status !== 'ok') {
+      throw new Error(
+        wait.status === 'ok_but_empty'
+          ? `maps job ${jobId} reported ok but /download stayed empty for the full 20 minute cap`
+          : `maps job ${jobId} ended ${wait.status}`)
     }
 
-    const raw = await source.results(jobId)
-    ctx.logger.info('maps scrape complete', { returned: raw.length })
+    // waitFor already downloaded the body to prove it was non-empty; parsing
+    // that rather than re-fetching avoids a second 120 s transfer and removes
+    // the window where the scraper could truncate the file between calls.
+    const raw = wait.body ? parseCsv(wait.body) : await source.results(jobId)
+    ctx.logger.info('maps scrape complete', { returned: raw.length, bytes: wait.bytes })
 
     // ── filter ────────────────────────────────────────────────────────────────
     const drops: Record<string, number> = {}
