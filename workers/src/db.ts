@@ -17,46 +17,45 @@ import type { Config } from './config.js'
 const { Pool } = pg
 
 export interface Db {
-  /** Pooled — pgbouncer transaction mode. Use for all application queries. */
+  /** Transaction pooling (:6543). Every application query goes here. */
   app: pg.Pool
-  /** Session mode — reserved for graphile-worker's listener. */
-  direct: pg.Pool
   close(): Promise<void>
 }
+
+/**
+ * Session-mode connections are a scarce, shared resource.
+ *
+ * Supavisor allows only 15 session clients for the whole project — measured the
+ * hard way, when the sixth worker crash-looped on
+ * `(EMAXCONNSESSION) max clients reached in session mode`. graphile-worker
+ * needs session mode for LISTEN/NOTIFY, so the budget is spent almost entirely
+ * on queue listeners and there is none to spare for an application pool.
+ *
+ * Hence: no long-lived session pool here at all. Application queries use the
+ * transaction pooler, which has a far larger client allowance, and the queue
+ * gets a small fixed session allocation set in index.ts.
+ */
+export const SESSION_POOL_LIMIT = 15
+export const SESSION_CONNS_PER_WORKER = 2
 
 export function createDb(config: Config): Db {
   const app = new Pool({
     connectionString: config.databaseUrl,
-    max: Math.max(4, config.concurrency + 2),
-    // pgbouncer cannot use server-side prepared statements in transaction mode.
-    // node-postgres only prepares when a query has a `name`, so this is really
-    // a reminder for anyone tempted to add one.
+    max: Math.max(3, Math.min(config.concurrency + 1, 8)),
+    // Transaction pooling cannot use server-side prepared statements.
+    // node-postgres only prepares named queries, and we issue none — this is a
+    // note for anyone tempted to add one.
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
     application_name: `leadgen-worker-${config.role}`,
   })
 
-  const direct = new Pool({
-    connectionString: config.databaseUrlDirect,
-    // The listener needs one connection. A couple spare for the migrator.
-    max: 3,
-    idleTimeoutMillis: 0,
-    connectionTimeoutMillis: 10_000,
-    application_name: `leadgen-queue-${config.role}`,
+  // An unhandled 'error' on an idle client takes the process down.
+  app.on('error', err => {
+    console.error(JSON.stringify({ level: 'error', message: 'pg app pool error', err: err.message }))
   })
 
-  // An error on an idle client is emitted on the pool, and an unhandled 'error'
-  // event on an EventEmitter takes the process down.
-  app.on('error', err => { console.error(JSON.stringify({ level: 'error', message: 'pg app pool error', err: err.message })) })
-  direct.on('error', err => { console.error(JSON.stringify({ level: 'error', message: 'pg direct pool error', err: err.message })) })
-
-  return {
-    app,
-    direct,
-    async close() {
-      await Promise.allSettled([app.end(), direct.end()])
-    },
-  }
+  return { app, async close() { await app.end().catch(() => {}) } }
 }
 
 /**
@@ -66,20 +65,35 @@ export function createDb(config: Config): Db {
  * catch the single most likely misconfiguration — both variables set to the
  * same pooled URL — at boot rather than as mysteriously slow job pickup.
  */
-export async function assertConnectionModes(db: Db): Promise<{ direct: 'session' | 'unknown' }> {
-  const client = await db.direct.connect()
+export async function assertConnectionModes(config: Config): Promise<void> {
+  // A single short-lived client, not a pool: this runs once at boot and must
+  // not hold one of the 15 session slots for the process lifetime.
+  const client = new pg.Client({
+    connectionString: config.databaseUrlDirect,
+    connectionTimeoutMillis: 15_000,
+    application_name: `leadgen-boot-${config.role}`,
+  })
   try {
+    await client.connect()
     await client.query('LISTEN leadgen_boot_probe')
     await client.query('UNLISTEN leadgen_boot_probe')
-    return { direct: 'session' }
   } catch (err) {
+    const message = (err as Error).message
+    if (/EMAXCONNSESSION|max clients reached/i.test(message)) {
+      throw new Error(
+        'Session-mode connection budget is exhausted. Supavisor allows ~' +
+        `${SESSION_POOL_LIMIT} session clients per project and every worker needs ` +
+        `about ${SESSION_CONNS_PER_WORKER} for graphile-worker's LISTEN/NOTIFY. ` +
+        'Run fewer worker replicas, or raise the pool size in the Supabase ' +
+        `dashboard. Underlying error: ${message}`,
+      )
+    }
     throw new Error(
       'DATABASE_URL_DIRECT does not support LISTEN/NOTIFY — it looks like a ' +
-      'pgbouncer transaction-mode URL. graphile-worker needs a session-mode ' +
-      'connection here (Supabase: the direct 5432 connection string, not the ' +
-      `6543 pooler). Underlying error: ${(err as Error).message}`,
+      'transaction-mode URL. graphile-worker needs session mode (Supabase: the ' +
+      `:5432 pooler, not :6543). Underlying error: ${message}`,
     )
   } finally {
-    client.release()
+    await client.end().catch(() => {})
   }
 }

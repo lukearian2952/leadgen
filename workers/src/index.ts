@@ -10,7 +10,7 @@ import './net.js'
 
 import { run, type Runner } from 'graphile-worker'
 import { loadConfig, degradedWarnings, ConfigError } from './config.js'
-import { createDb, assertConnectionModes, type Db } from './db.js'
+import { createDb, assertConnectionModes, SESSION_CONNS_PER_WORKER, type Db } from './db.js'
 import { rootLogger } from './logger.js'
 import { startMetricsServer, metrics } from './metrics.js'
 import { buildTaskList, stagesForRole } from './jobs/index.js'
@@ -34,7 +34,7 @@ async function main() {
   // Catches the single most likely deployment mistake — both connection
   // strings pointing at the pgbouncer pooler — before it turns into
   // mysteriously slow job pickup rather than a visible failure.
-  await assertConnectionModes(db)
+  await assertConnectionModes(config)
   logger.info('DATABASE_URL_DIRECT confirmed session-mode (LISTEN/NOTIFY available)')
 
   let runner: Runner | undefined
@@ -54,6 +54,10 @@ async function main() {
     // graphile-worker needs the session-mode connection for LISTEN/NOTIFY.
     connectionString: config.databaseUrlDirect,
     concurrency: config.concurrency,
+    // Session slots are a project-wide budget of ~15 across every worker, so
+    // the queue gets a small fixed allocation rather than one-per-concurrency.
+    // Without this the sixth worker crash-loops on EMAXCONNSESSION.
+    maxPoolSize: SESSION_CONNS_PER_WORKER,
     // Its migrations create the graphile_worker schema on first boot.
     noHandleSignals: true,
     pollInterval: 2000,

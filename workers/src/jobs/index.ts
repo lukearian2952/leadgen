@@ -13,6 +13,10 @@ import type { Config, WorkerRole } from '../config.js'
 import type { Logger } from '../logger.js'
 import { wrapTask } from './wrap.js'
 import { makeVerifyBatchTask } from './verify-batch.js'
+import { makeMapsDiscoverTask } from './maps-discover.js'
+import { makeCrawlSiteTask } from './crawl-site.js'
+import { makeEnrichLeadTask } from './enrich-lead.js'
+import { makeReconcileTask } from './reconcile.js'
 
 export interface TaskDeps {
   config: Config
@@ -50,7 +54,11 @@ export function buildTaskList(deps: TaskDeps): TaskList {
       ctx.logger.info('ping', { echo: payload.echo ?? null })
     }),
 
-    'verify:batch': makeVerifyBatchTask(deps),
+    'verify:batch':       makeVerifyBatchTask(deps),
+    'maps:discover':      makeMapsDiscoverTask(deps),
+    'crawl:site':         makeCrawlSiteTask(deps),
+    'enrich:lead':        makeEnrichLeadTask(deps),
+    'campaign:reconcile': makeReconcileTask(deps),
   }
 
   // `ping` is always registered — it is how health checks and the smoke test
