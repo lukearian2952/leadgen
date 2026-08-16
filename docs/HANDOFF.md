@@ -190,10 +190,57 @@ Any process that sets a campaign to `status='running'` would have retriggered
 this. The cron is now unscheduled; verify with `select count(*) from cron.job`
 before every run.
 
-### 5.2 — Port 25 intermittency (UNRESOLVED — the blocker)
+### 5.2 — Port 25 (**RESOLVED 2026-08-16: outbound TCP/25 is dropped upstream**)
 
-This is why Tier A is zero. **Root cause not established.** Every measurement,
-in order, with its validity:
+**Root cause: every outbound TCP/25 packet from `92.112.184.200` is silently
+discarded beyond our NIC, on both address families.** It is not intermittent,
+not Google, not Docker, not IPv6, and not the prober. A small number of
+connections succeed after a long idle and everything after them is dropped —
+which is what made it look intermittent.
+
+Established by three independent methods that agree:
+
+1. **Shell probes** (`nc -4/-6`, exit status captured per attempt, validated
+   against known-open and known-unreachable targets first). Concurrency 1:
+   Google 2/13, Outlook 2/12, improvmx 1/12 — and *every* success falls in the
+   first four seconds, followed by 33 consecutive failures. A 40-round control
+   ran alongside: `1.1.1.1:443` scored **40/40** while `MX:25` scored **0/40**
+   over 17.5 minutes.
+2. **Packet capture on `eth0`.** SYNs leave the interface with the correct
+   source address and are retransmitted seven times; **nothing returns** — no
+   SYN-ACK, no RST, no ICMP. A 443 control on the same NIC completes its
+   handshake in 5 ms. Packets leave the box and die upstream, so nothing local
+   is responsible.
+3. **`GET /debug/dial`** — the prober's own dialler, same `LocalAddr` binding and
+   family pinning: `0/5` to Google over tcp4, `0/5` over tcp6, `0/20` to
+   Outlook, all `i/o timeout`.
+
+**Port-specific, not host-specific.** On `mx1.improvmx.com` at one instant:
+`:587` → 81 ms, `:465` → 85 ms, `:25` → timeout. **Provider-independent:**
+Google, Microsoft and improvmx (AWS) fail identically and simultaneously, which
+no single mailbox provider could coordinate.
+
+**Both families are affected.** IPv6 :25 worked for ~26 connections (Google even
+returned a full banner and `250-mx.google.com at your service,
+[2a02:4780:2d:e3fc::1]`) and then failed continuously from 22:32 onward. IPv6 is
+therefore **not** a workaround — it hits the same limiter, and the v6 address has
+neither PTR nor SPF.
+
+This corrects three claims previously recorded here: measurement #9's confound
+was *not* broken IPv6 (v6 egress is healthy — `ping6` 0% loss, `curl -6` 200 in
+117 ms); the prober's tcp4 pinning was never the issue; and "Hostinger blocking
+25", rejected in the old *Ruled out* list on the grounds that "connections do
+succeed, just unreliably", was right after all — the successes are a burst
+allowance, not evidence of an open path.
+
+**Blocked on Hostinger lifting the block.** No concurrency setting helps: the
+measured sustainable rate is zero, so there is no safe rate to throttle down to.
+
+---
+
+#### Historical: the measurements taken before the cause was known
+
+Kept because the validity notes are the useful part.
 
 | # | Measurement | Result | Valid? |
 |---|---|---|---|
@@ -220,15 +267,18 @@ latter connected. So #9 is partly measuring the dead v6 route, not port 25.
 **Ruled out:**
 - *Google throttling* — Outlook and improvmx behave the same; Google cannot
   throttle improvmx. An earlier "Google penalty box" conclusion was unsupported.
-- *Hostinger blocking 25* — connections do succeed, just unreliably.
+- ~~*Hostinger blocking 25* — connections do succeed, just unreliably.~~
+  **This dismissal was wrong; see the resolution above.**
 - *Docker networking* — 443 works from host, bridge container and host-mode
   container alike.
 - *Local firewall* — `iptables OUTPUT policy ACCEPT`, nft empty of relevant
-  rules, ufw inactive.
+  rules, ufw inactive. Re-confirmed by packet capture: the SYNs do leave `eth0`.
 
-**Still unexplained:** the prober dials `tcp4` explicitly, so the IPv6 confound
-should not affect it, yet it sees `i/o timeout` to Gmail at batch volume while
-succeeding at low volume.
+Also ruled out during the 2026-08-16 diagnosis: conntrack pressure
+(101 / 262144 in use, no dmesg events), MTU (1500 uniform, no PMTU blackhole),
+ephemeral-port or TIME_WAIT exhaustion (0 sockets in TIME_WAIT to :25), and
+resolver behaviour (systemd-resolved via 1.1.1.1; AAAA-first ordering is real
+but irrelevant, since both families are dropped).
 
 ### 5.3 — gosom results unreachable
 Two defects. The scraper demonstrably retrieves the right businesses (Nu Med,
