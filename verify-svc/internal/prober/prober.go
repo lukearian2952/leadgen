@@ -14,6 +14,7 @@ package prober
 
 import (
 	"context"
+	"regexp"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -35,8 +36,18 @@ const (
 	minRCPTGap     = 3 * time.Second
 	maxRCPTGap     = 5 * time.Second
 	maxRCPTPerConn = 5
-	dialTimeout    = 15 * time.Second
+	dialTimeout    = 20 * time.Second
 	cmdTimeout     = 20 * time.Second
+
+	// Minimum gap between opening NEW TCP connections to the same MX host.
+	//
+	// This is the fix for the failure that produced zero Tier A rows. Large
+	// providers silently drop SYN packets from an IP that opens connections too
+	// fast; the symptom is `dial ... i/o timeout`, not an SMTP rejection, so it
+	// looks like the mailbox is unreachable when in fact we are being throttled.
+	// A 38-candidate batch produced 26 such timeouts against aspmx.l.google.com
+	// while a 3-candidate batch to the same host succeeded every time.
+	minConnGapPerMX = 12 * time.Second
 )
 
 // Status values returned to the worker.
@@ -56,6 +67,10 @@ type Result struct {
 	IsRole       bool   `json:"is_role"`
 	LatencyMS    int64  `json:"latency_ms"`
 	Detail       string `json:"detail,omitempty"`
+	// Transient means "ask again later" — a dial timeout, a 4xx, or a policy
+	// refusal. The caller must schedule a retry rather than treat it as a
+	// verdict. Any 4xx is transient by definition, never `invalid`.
+	Transient    bool   `json:"transient,omitempty"`
 }
 
 // Config is the service's static configuration.
@@ -75,6 +90,21 @@ type Prober struct {
 	// rather than one global lock, so different providers proceed in parallel
 	// — the constraint is per-MX, not service-wide.
 	mxLocks sync.Map // map[string]*sync.Mutex
+	// Last time we opened a connection to each MX host, for pacing.
+	lastConn sync.Map // map[string]time.Time
+}
+
+// waitForMXSlot paces new connections to one MX host.
+func (p *Prober) waitForMXSlot(ctx context.Context, mxHost string) {
+	if v, ok := p.lastConn.Load(mxHost); ok {
+		if elapsed := time.Since(v.(time.Time)); elapsed < minConnGapPerMX {
+			select {
+			case <-ctx.Done():
+			case <-time.After(minConnGapPerMX - elapsed):
+			}
+		}
+	}
+	p.lastConn.Store(mxHost, time.Now())
 }
 
 func New(cfg Config, ips *ipstate.Store) *Prober {
@@ -225,6 +255,7 @@ func (p *Prober) probeDomain(
 	}
 
 	started := time.Now()
+	p.waitForMXSlot(ctx, mxHost)
 	session, err := p.dial(ctx, decision.IP, mxHost)
 	if err != nil {
 		reason := err.Error()
@@ -235,6 +266,7 @@ func (p *Prober) probeDomain(
 		for _, e := range addrs {
 			results[e].Status = StatusUnknown
 			results[e].Detail = "connect failed: " + truncate(reason, 200)
+			results[e].Transient = true
 		}
 		return false, nil
 	}
@@ -312,30 +344,50 @@ func (p *Prober) probeDomain(
 		case ok:
 			res.Status = StatusSafe
 			res.Detail = truncate(reply, 200)
+			// Stop at the first deliverable address. Continuing burns RCPTs and
+			// forces reconnects, which is what triggered the provider
+			// throttling above — and once one candidate is confirmed the rest
+			// are irrelevant.
+			for _, rest := range addrs {
+				if results[rest].Status == "" {
+					results[rest].Status = StatusUnknown
+					results[rest].Detail = "not probed — a deliverable address was already found"
+				}
+			}
+			return false, nil
 
 		case isPermanentReject(reply):
 			res.Status = StatusInvalid
 			res.Detail = truncate(reply, 200)
 
 		default:
-			// A temporary failure that is not a block — greylisting on a single
-			// address, a full mailbox. Honest answer is "we don't know".
+			// A 4xx, or a 5xx policy refusal. Either way the server has not told
+			// us whether the mailbox exists, so this is "ask again later" and
+			// must never become `invalid`.
 			res.Status = StatusUnknown
 			res.Detail = truncate(reply, 200)
+			res.Transient = true
 		}
 	}
 
 	return false, nil
 }
 
+// policyReject matches 5xx replies that are about US, not about the mailbox.
+//
+// "550 Please turn on SMTP Authentication in your mail client" is an
+// open-relay guard: the server is refusing to answer, not saying the mailbox is
+// absent. Recording that as `invalid` writes off a lead the server never
+// actually judged — observed on slim-herbal.com during this audit.
+var policyReject = regexp.MustCompile(`(?i)authentication|not permitted|relay(ing)? (denied|not)|policy|blocked|spam|reputation|5\.7\.\d+`)
+
 // isPermanentReject distinguishes "no such mailbox" from everything else.
 func isPermanentReject(reply string) bool {
 	trimmed := strings.TrimSpace(reply)
-	if len(trimmed) < 3 {
+	if len(trimmed) < 3 || !strings.HasPrefix(trimmed, "5") {
 		return false
 	}
-	// 5xx, but not 5.7.1 (that is a policy block, handled as a block above).
-	return strings.HasPrefix(trimmed, "5") && !strings.Contains(trimmed, "5.7.1")
+	return !policyReject.MatchString(trimmed)
 }
 
 func primaryMX(mx *emailverifier.Mx) string {
