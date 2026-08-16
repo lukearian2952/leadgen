@@ -151,3 +151,38 @@ that deletes them, and every DB change is additive. Rolling back = redeploying t
 functions and unscheduling `campaign-reconcile`. After Phase 5's column cleanup, rollback
 requires a restore, so that cleanup happens only once v2 has run the 1,000-lead
 benchmark.
+
+---
+
+## Phase 2 field notes (2026-08-16)
+
+**The v1 pipeline was still live and racing v2.** The `campaign-watchdog` pg_cron
+job from `20260803000001` remained scheduled (`*/5`). It saw the Phase 2
+campaign sitting at `status='running'`, kicked v1's orchestrator, and scraped
+100 businesses through the Google Places API — into the same `leads` table the
+v2 workers were writing to. v1's AI location expansion turned "Long Island, NY"
+into New York and Brooklyn, so the rows were the wrong region as well as the
+wrong provenance. They are identifiable by empty `sources` / `evidence`, which
+every v2 writer populates.
+
+Unscheduled with `select cron.unschedule('campaign-watchdog')`. Reversible by
+re-running the `cron.schedule` block in that migration. **Anything that sets a
+campaign to `running` before this point would have triggered it** — this was
+listed in §2 as a thing to turn off and was not done in time.
+
+**gosom integration is not finished.** Two defects, both observed:
+
+1. A job's status flips to `ok` while scraping is still in progress, and
+   `/download` returns 0 bytes at that moment. `MapsSource.waitFor` trusts the
+   status and reports `returned: 0`. Polling must additionally require a
+   non-empty download, or track `numOfJobsCompleted` from the scraper's own
+   stats.
+2. Playwright inside the scraper cannot authenticate to Decodo: 498 occurrences
+   of `ERR_PROXY_AUTH_UNSUPPORTED` and `Upstream proxy rejected CONNECT: 522`.
+   Chromium does not accept credentials embedded in a `--proxy-server` URL. The
+   scraper needs either a local auth-forwarding proxy or its own credential
+   flag; passing `http://user:pass@host:port` does not work.
+
+Neither is a design problem with the architecture — the scraper demonstrably
+retrieves the right businesses (Nu Med, Brizel, Deep Blue in Garden City) — but
+the results never reach the worker, so Phase 2 has no valid discovery output yet.
