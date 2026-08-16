@@ -1,0 +1,16 @@
+[Unit]
+Description=Restrict LeadGen verify-svc :8080 to loopback and Docker bridges
+# After docker, because the br-* interfaces the rules match on do not exist
+# until Docker has created its networks. The rules would still install without
+# them (iptables accepts an interface name that does not yet exist), but
+# ordering it this way keeps the boot log honest about what ran when.
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/leadgen-firewall.sh
+
+[Install]
+WantedBy=multi-user.target
