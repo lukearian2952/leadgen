@@ -148,8 +148,23 @@ func (p *Prober) Verify(ctx context.Context, emails []string) ([]Result, error) 
 			continue
 		}
 
-		domainsNeedingSMTP++
 		host := primaryMX(mx)
+
+		// RFC 7505 null MX: a single record of "." means the domain publishes,
+		// explicitly, that it accepts no mail. The library reports
+		// HasMXRecord=true for it, so without this check we would try to dial
+		// the host "." , fail to connect, and report `unknown` — turning a
+		// definitive "invalid" into a paid Verifalia escalation. example.com
+		// does exactly this, which is how it was caught.
+		if host == "" || host == "." {
+			for _, e := range addrs {
+				results[e].Status = StatusInvalid
+				results[e].Detail = "null MX (RFC 7505) — domain accepts no mail"
+			}
+			continue
+		}
+
+		domainsNeedingSMTP++
 
 		cooled, err := p.probeDomain(ctx, domain, host, addrs, results)
 		if err != nil && errors.Is(err, ErrAllCooling) {

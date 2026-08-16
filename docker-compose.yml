@@ -1,24 +1,36 @@
 # LeadGen v2 worker fleet.
 #
-#   docker compose up -d                      # everything
-#   docker compose up -d --scale crawl-worker=4
+#   docker compose up -d                          # Phase 2 set (default profile)
+#   docker compose --profile full up -d           # every worker role
+#   docker compose up -d --scale crawl-worker=3
 #   docker compose logs -f verify-svc
 #
-# Postgres is Supabase's, not ours — there is no postgres service here. pgbouncer
-# sits in front of it so worker replicas do not exhaust Supabase's connection
-# limit, and every worker also holds one session-mode connection straight to
-# Supabase for graphile-worker's LISTEN/NOTIFY. See docs/ENV.md.
+# ── Memory ───────────────────────────────────────────────────────────────────
+# This box also runs Odoo and n8n. Every service has an explicit mem_limit so a
+# crawl spike cannot starve them. Default profile totals 5.75 GB; `full` adds
+# three more workers for 7.25 GB. See docs/DEPLOY.md for the arithmetic.
+#
+# ── Database ─────────────────────────────────────────────────────────────────
+# There is no pgbouncer in the default path, deliberately. Supabase's Supavisor
+# already provides transaction pooling on :6543 and session pooling on :5432,
+# and chaining our own pooler in front of it buys nothing while making prepared
+# statements and connection debugging harder. The pgbouncer service below is
+# kept behind the `local-pool` profile for the day this points at self-hosted
+# Postgres.
+#
+# `db.<ref>.supabase.co` is NOT usable: Supabase dropped IPv4 for direct
+# connections and it now resolves AAAA-only. Both URLs go through the pooler
+# hostname, which has A records.
 
 x-worker-base: &worker-base
   build:
     context: ./workers
     dockerfile: Dockerfile
   restart: unless-stopped
-  depends_on:
-    pgbouncer:
-      condition: service_started
+  mem_limit: 512m
+  memswap_limit: 512m
   environment: &worker-env
-    DATABASE_URL: postgres://${SUPABASE_DB_USER}:${SUPABASE_DB_PASSWORD}@pgbouncer:6432/${SUPABASE_DB_NAME}
+    DATABASE_URL: ${DATABASE_URL}
     DATABASE_URL_DIRECT: ${DATABASE_URL_DIRECT}
     SUPABASE_URL: ${SUPABASE_URL}
     SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
@@ -33,6 +45,7 @@ x-worker-base: &worker-base
     GOOGLE_MAPS_SCRAPER_URL: http://maps-scraper:8080
     GOOGLE_PLACES_API_KEY: ${GOOGLE_PLACES_API_KEY}
     SOCRATA_APP_TOKEN: ${SOCRATA_APP_TOKEN}
+    # verify-svc uses host networking, so it is reached via the gateway.
     VERIFY_URL: http://host.docker.internal:8080
     VERIFY_IPS: ${VERIFY_IPS}
     VERIFY_HELO_DOMAIN: ${VERIFY_HELO_DOMAIN}
@@ -45,50 +58,25 @@ x-worker-base: &worker-base
     WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
     LOG_LEVEL: ${LOG_LEVEL:-info}
     METRICS_PORT: 9100
+    # Hostinger's IPv6 is unreliable and Node black-holes on it rather than
+    # falling back. Stays on until proven unnecessary.
+    FORCE_IPV4: ${FORCE_IPV4:-true}
   extra_hosts:
     - "host.docker.internal:host-gateway"
 
 services:
-  # ── connection pooling ──────────────────────────────────────────────────────
-  #
-  # Transaction mode: many short worker queries share few server connections.
-  # This is why graphile-worker cannot use it (no LISTEN/NOTIFY) and gets its
-  # own direct connection instead.
-  pgbouncer:
-    image: edoburu/pgbouncer:v1.23.1-p2
-    restart: unless-stopped
-    environment:
-      DB_HOST: ${SUPABASE_DB_HOST}
-      DB_PORT: ${SUPABASE_DB_PORT:-5432}
-      DB_USER: ${SUPABASE_DB_USER}
-      DB_PASSWORD: ${SUPABASE_DB_PASSWORD}
-      DB_NAME: ${SUPABASE_DB_NAME}
-      POOL_MODE: transaction
-      MAX_CLIENT_CONN: 200
-      DEFAULT_POOL_SIZE: 20
-      AUTH_TYPE: scram-sha-256
-      # Server-side prepared statements are incompatible with transaction
-      # pooling; node-postgres only prepares named queries, and we issue none.
-      IGNORE_STARTUP_PARAMETERS: extra_float_digits,options
-    ports:
-      - "127.0.0.1:6432:6432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U ${SUPABASE_DB_USER}"]
-      interval: 20s
-      timeout: 5s
-      retries: 5
-
   # ── verification ────────────────────────────────────────────────────────────
   #
   # host networking is required: the prober binds outbound connections to
-  # specific public IPs (VERIFY_IPS), which is impossible from inside Docker's
-  # default bridge network. This is also why it is not on the app network.
+  # specific public IPs, which is impossible from Docker's bridge network.
   verify-svc:
     build:
       context: ./verify-svc
       dockerfile: Dockerfile
     restart: unless-stopped
     network_mode: host
+    mem_limit: 256m
+    memswap_limit: 256m
     environment:
       DATABASE_URL: ${DATABASE_URL_DIRECT}
       VERIFY_IPS: ${VERIFY_IPS}
@@ -100,6 +88,8 @@ services:
   searxng:
     image: searxng/searxng:latest
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
     volumes:
       - ./searxng:/etc/searxng:rw
     environment:
@@ -108,38 +98,80 @@ services:
     ports:
       - "127.0.0.1:8888:8080"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1"]
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 5
+      start_period: 30s
 
   # ── crawling ────────────────────────────────────────────────────────────────
+  #
+  # crawl4ai bundles its own Playwright browsers, so there is no separate
+  # playwright service in the default path — it would be 2 GB of duplicate
+  # runtime. The standalone image stays behind the `full` profile for the
+  # bespoke-automation cases Phase 4 may need.
   crawl4ai:
     image: unclecode/crawl4ai:latest
     restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
     shm_size: 1gb
     environment:
-      # crawl4ai routes browser traffic through this when set.
       PROXY_SERVER: http://${DECODO_HOST}:${DECODO_PORT}
       PROXY_USERNAME: ${DECODO_USERNAME}
       PROXY_PASSWORD: ${DECODO_PASSWORD}
     ports:
       - "127.0.0.1:11235:11235"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:11235/health || exit 1"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:11235/health',timeout=5)\" || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
+      start_period: 60s
+
+  playwright:
+    profiles: ["full"]
+    image: mcr.microsoft.com/playwright:v1.49.0-jammy
+    restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
+    shm_size: 1gb
+    command: ["npx", "-y", "playwright@1.49.0", "run-server", "--port", "3300", "--host", "0.0.0.0"]
+    expose: ["3300"]
 
   # ── Google Maps ─────────────────────────────────────────────────────────────
   maps-scraper:
     image: gosom/google-maps-scraper:latest
     restart: unless-stopped
-    command: ["-web", "-addr", ":8080", "-c", "4"]
+    mem_limit: 512m
+    memswap_limit: 512m
+    command: ["-web", "-addr", ":8080", "-c", "2"]
     ports:
       - "127.0.0.1:8085:8080"
 
-  # ── workers, one per role ───────────────────────────────────────────────────
+  # ── optional local pooler (only for self-hosted Postgres) ───────────────────
+  pgbouncer:
+    profiles: ["local-pool"]
+    image: edoburu/pgbouncer:v1.23.1-p2
+    restart: unless-stopped
+    mem_limit: 128m
+    environment:
+      DB_HOST: ${SUPABASE_DB_HOST}
+      DB_PORT: ${SUPABASE_DB_PORT:-5432}
+      DB_USER: ${SUPABASE_DB_USER}
+      DB_PASSWORD: ${SUPABASE_DB_PASSWORD}
+      DB_NAME: ${SUPABASE_DB_NAME:-postgres}
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 200
+      DEFAULT_POOL_SIZE: 20
+      AUTH_TYPE: scram-sha-256
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits,options
+    ports:
+      - "127.0.0.1:6432:6432"
+
+  # ── workers ─────────────────────────────────────────────────────────────────
+  # Default profile = the roles Phase 2 exercises.
+
   maps-worker:
     <<: *worker-base
     environment:
@@ -147,42 +179,20 @@ services:
       WORKER_ROLE: maps
     ports: ["127.0.0.1:9101:9100"]
 
-  serp-worker:
-    <<: *worker-base
-    environment:
-      <<: *worker-env
-      WORKER_ROLE: serp
-    ports: ["127.0.0.1:9102:9100"]
-
   crawl-worker:
     <<: *worker-base
     environment:
       <<: *worker-env
       WORKER_ROLE: crawl
-    # No fixed host port: this one is scaled with --scale, and a fixed mapping
-    # would collide on the second replica.
+    # No fixed host port — this is the one that gets --scale'd.
     expose: ["9100"]
-
-  linkedin-worker:
-    <<: *worker-base
-    environment:
-      <<: *worker-env
-      WORKER_ROLE: linkedin
-    ports: ["127.0.0.1:9104:9100"]
-
-  registry-worker:
-    <<: *worker-base
-    environment:
-      <<: *worker-env
-      WORKER_ROLE: registry
-    ports: ["127.0.0.1:9105:9100"]
 
   enrich-worker:
     <<: *worker-base
     environment:
       <<: *worker-env
       WORKER_ROLE: enrich
-    expose: ["9100"]
+    ports: ["127.0.0.1:9106:9100"]
 
   verify-worker:
     <<: *worker-base
@@ -196,6 +206,31 @@ services:
     environment:
       <<: *worker-env
       WORKER_ROLE: scheduler
-      # The reconcile loop must be a singleton; never scale this service.
+      # The reconcile loop is a singleton. Never scale this service.
       WORKER_CONCURRENCY: 1
     ports: ["127.0.0.1:9108:9100"]
+
+  # Phase 3/4 roles — not started by default, so the box stays under budget.
+  serp-worker:
+    <<: *worker-base
+    profiles: ["full"]
+    environment:
+      <<: *worker-env
+      WORKER_ROLE: serp
+    ports: ["127.0.0.1:9102:9100"]
+
+  linkedin-worker:
+    <<: *worker-base
+    profiles: ["full"]
+    environment:
+      <<: *worker-env
+      WORKER_ROLE: linkedin
+    ports: ["127.0.0.1:9104:9100"]
+
+  registry-worker:
+    <<: *worker-base
+    profiles: ["full"]
+    environment:
+      <<: *worker-env
+      WORKER_ROLE: registry
+    ports: ["127.0.0.1:9105:9100"]
