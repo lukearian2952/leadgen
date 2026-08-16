@@ -18,8 +18,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -129,6 +131,7 @@ func main() {
 	mux.HandleFunc("POST /verify", srv.handleVerify)
 	mux.HandleFunc("GET /healthz", srv.handleHealth)
 	mux.HandleFunc("GET /metrics", srv.handleMetrics)
+	mux.HandleFunc("GET /debug/dial", srv.handleDebugDial)
 
 	log.Info("verify-svc listening",
 		"port", port, "ips", cfg.IPs, "helo", cfg.HeloDomain, "from", cfg.FromEmail)
@@ -227,6 +230,102 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"total_ips":   len(s.cfg.IPs),
 		"helo_domain": s.cfg.HeloDomain,
 	})
+}
+
+// handleDebugDial reports what the prober's own dialler experiences.
+//
+// It is bound to the same host-networked process, uses the same Dialer settings
+// and the same LocalAddr binding as a real probe, so its answer applies to the
+// verifier directly. A shell probe from the host does not — different resolver,
+// different family selection, different source address.
+//
+//	GET /debug/dial?host=aspmx.l.google.com&port=25&family=ipv4&n=10&gap_ms=3000&banner=1
+//
+// family may be ipv4, ipv6, or omitted for both.
+func (s *server) handleDebugDial(w http.ResponseWriter, r *http.Request) {
+	// This endpoint opens an arbitrary outbound TCP connection from our public
+	// IP, so exposing it to the internet would hand anyone a port scanner
+	// wearing our address — and this service listens on 0.0.0.0 because it runs
+	// with host networking. Workers reach it over the Docker bridge gateway
+	// (RFC1918), never from off-box, so private and loopback sources are the
+	// whole legitimate audience.
+	if !isPrivateCaller(r.RemoteAddr) {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error": "debug endpoints are reachable from private addresses only",
+		})
+		return
+	}
+
+	q := r.URL.Query()
+
+	host := strings.TrimSpace(q.Get("host"))
+	if host == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "host is required"})
+		return
+	}
+
+	port := strings.TrimSpace(q.Get("port"))
+	if port == "" {
+		port = "25"
+	}
+
+	var families []string
+	if fam := strings.TrimSpace(q.Get("family")); fam != "" {
+		families = []string{fam}
+	}
+
+	n := atoiOr(q.Get("n"), 1)
+	if n < 1 {
+		n = 1
+	}
+	if n > 60 {
+		n = 60 // this opens real connections to real mail servers; keep it bounded
+	}
+	gap := atoiOr(q.Get("gap_ms"), 3000)
+	banner := q.Get("banner") == "1"
+
+	// Its own timeout, independent of the caller's, so a long sweep is not cut
+	// off halfway and reported as a network failure.
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
+	defer cancel()
+
+	rounds := s.prober.DebugSweep(ctx, host, port, families, n, gap, banner)
+
+	okCount, total := 0, 0
+	for _, round := range rounds {
+		okCount += round.OKCount
+		total += round.Total
+		for _, at := range round.Attempts {
+			s.log.Info("debug dial", "detail", at.String())
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"host": host, "port": port, "rounds": rounds,
+		"ok": okCount, "total": total,
+	})
+}
+
+// isPrivateCaller reports whether a request came from loopback or an RFC1918 /
+// link-local address — i.e. from this host or a container on it.
+func isPrivateCaller(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
+func atoiOr(raw string, fallback int) int {
+	v, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return fallback
+	}
+	return v
 }
 
 func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
