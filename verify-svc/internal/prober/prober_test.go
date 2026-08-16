@@ -371,6 +371,26 @@ func TestSuccessResetsConsecutiveFailures(t *testing.T) {
 	}
 }
 
+// dialAttempts is incremented once, before the dial. Counting again on success
+// made the failure ratio on /metrics look better than it was.
+func TestEachDialCountsExactlyOnce(t *testing.T) {
+	f := newFailureTracker()
+	now := time.Now()
+
+	f.recordAttempt()
+	f.recordSuccess("mx.test")
+	f.recordAttempt()
+	f.recordFailure("mx.test", now)
+
+	s := f.stats(now)
+	if s.DialAttempts != 2 {
+		t.Errorf("expected 2 attempts for 2 dials, got %d", s.DialAttempts)
+	}
+	if s.DialFailures != 1 {
+		t.Errorf("expected 1 failure, got %d", s.DialFailures)
+	}
+}
+
 func TestTenFailuresInFiveMinutesCoolTheIP(t *testing.T) {
 	f := newFailureTracker()
 	now := time.Now()

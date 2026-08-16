@@ -147,10 +147,13 @@ func (f *failureTracker) recordFailure(mxHost string, now time.Time) dialOutcome
 //
 // It deliberately does not touch recentFailures: the IP-wide rule is about the
 // rate of failures in a window, and a success elsewhere does not undo them.
+//
+// It also does not increment dialAttempts — the caller already did that before
+// dialling, and counting again here made every successful dial score twice, so
+// the failure ratio on /metrics read better than reality.
 func (f *failureTracker) recordSuccess(mxHost string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.dialAttempts++
 	delete(f.consecutive, mxHost)
 }
 
