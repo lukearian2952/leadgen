@@ -363,15 +363,37 @@ type session struct {
 //
 // Binding the local address is the mechanism behind IP rotation: the container
 // runs with host networking so the VPS's public IPs are directly bindable.
+//
+// The network is pinned to the address family of the bound IP, and that is not
+// cosmetic. With plain "tcp", Go resolves the MX to whichever family it prefers
+// — on a dual-stack host that is usually IPv6 — and then fails the dial with a
+// mismatched-address-family error because LocalAddr is IPv4. Measured on
+// srv607166: gmail-smtp-in.l.google.com answered over IPv6 (`2a02:4780:...`)
+// while outlook answered over IPv4, so unpinned dialling would have broken
+// every Gmail probe while appearing to work for Microsoft.
+//
+// Pinning also keeps reputation on the address we actually configured. An
+// accidental IPv6 egress carries its own PTR and SPF, neither of which is set
+// up, so those probes would be judged on an unconfigured identity.
 func (p *Prober) dial(ctx context.Context, localIP, mxHost string) (*session, error) {
-	dialer := &net.Dialer{
-		Timeout:   dialTimeout,
-		LocalAddr: &net.TCPAddr{IP: net.ParseIP(localIP)},
+	local := net.ParseIP(localIP)
+	if local == nil {
+		return nil, fmt.Errorf("VERIFY_IPS contains an unparseable address: %q", localIP)
 	}
 
-	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(mxHost, "25"))
+	network := "tcp4"
+	if local.To4() == nil {
+		network = "tcp6"
+	}
+
+	dialer := &net.Dialer{
+		Timeout:   dialTimeout,
+		LocalAddr: &net.TCPAddr{IP: local},
+	}
+
+	conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(mxHost, "25"))
 	if err != nil {
-		return nil, fmt.Errorf("dial %s from %s: %w", mxHost, localIP, err)
+		return nil, fmt.Errorf("dial %s from %s over %s: %w", mxHost, localIP, network, err)
 	}
 	_ = conn.SetDeadline(time.Now().Add(cmdTimeout))
 
