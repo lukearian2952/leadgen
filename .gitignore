@@ -1,0 +1,40 @@
+# ── Secrets ───────────────────────────────────────────────────────────────────
+# Never commit real credentials. `.env.example` is the only env file that ships.
+.env
+.env.*
+!.env.example
+
+# ── Dependencies ──────────────────────────────────────────────────────────────
+node_modules/
+**/node_modules/
+vendor/**/__pycache__/
+*.egg-info/
+.venv/
+venv/
+
+# ── Build output ──────────────────────────────────────────────────────────────
+dist/
+build/
+*.tsbuildinfo
+
+# ── Deploy / tooling state ────────────────────────────────────────────────────
+.netlify
+supabase/.temp/
+supabase/.branches/
+
+# ── Runtime artefacts ─────────────────────────────────────────────────────────
+exports/
+*.log
+logs/
+coverage/
+test-results/
+playwright-report/
+
+# ── Go ────────────────────────────────────────────────────────────────────────
+verify-svc/bin/
+
+# ── OS / editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
