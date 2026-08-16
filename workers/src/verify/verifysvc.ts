@@ -6,6 +6,7 @@
 // routing signal for the hybrid layer, not a transient error to paper over.
 
 import type { VerifierProvider, VerifyResult, VerifyStatus } from './types.js'
+import { httpFetch } from '../net.js'
 import type { Logger } from '../logger.js'
 import { metrics } from '../metrics.js'
 
@@ -49,7 +50,7 @@ export class VerifySvcProvider implements VerifierProvider {
   async available(): Promise<boolean> {
     if (!this.baseUrl) return false
     try {
-      const res = await fetch(new URL('/healthz', this.baseUrl), {
+      const res = await httpFetch(new URL('/healthz', this.baseUrl), {
         signal: AbortSignal.timeout(5_000),
       })
       if (!res.ok) return false
@@ -70,7 +71,7 @@ export class VerifySvcProvider implements VerifierProvider {
     let body: SvcResponse
 
     try {
-      const res = await fetch(new URL('/verify', this.baseUrl), {
+      const res = await httpFetch(new URL('/verify', this.baseUrl), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ emails: deduped }),

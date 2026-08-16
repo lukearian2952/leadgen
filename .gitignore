@@ -38,3 +38,6 @@ verify-svc/bin/
 Thumbs.db
 .idea/
 *.swp
+
+# Vitest cache (kept out of node_modules so a root-owned install cannot break it)
+workers/.vitest-cache/

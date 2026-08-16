@@ -87,8 +87,11 @@ const SPECS: VarSpec[] = [
 
 export class ConfigError extends Error {}
 
-function readRole(): WorkerRole {
-  const raw = (process.env.WORKER_ROLE ?? 'all').trim() as WorkerRole
+function readRole(env: NodeJS.ProcessEnv): WorkerRole {
+  // Reads the injected env, not process.env. Taking it from the ambient
+  // process made loadConfig(env) a half-lie: callers could override every
+  // variable except the one that decides which variables are required.
+  const raw = (env.WORKER_ROLE ?? 'all').trim() as WorkerRole
   if (!WORKER_ROLES.includes(raw)) {
     throw new ConfigError(
       `WORKER_ROLE="${raw}" is not valid. Expected one of: ${WORKER_ROLES.join(', ')}`,
@@ -162,7 +165,7 @@ function parseLinkedinAccounts(raw: string) {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const role = readRole()
+  const role = readRole(env)
 
   const missing: string[] = []
   const degraded: string[] = []

@@ -9,6 +9,7 @@
 // costs money per check, so the hybrid router is careful about what reaches it.
 
 import type { VerifierProvider, VerifyResult, VerifyStatus } from './types.js'
+import { httpFetch } from '../net.js'
 import type { Logger } from '../logger.js'
 import { metrics } from '../metrics.js'
 
@@ -93,7 +94,7 @@ export class VerifaliaProvider implements VerifierProvider {
     for (let i = 0; i < deduped.length; i += CHUNK) {
       const chunk = deduped.slice(i, i + CHUNK)
       try {
-        const submitRes = await fetch(`${VERIF_BASE}/email-validations?waitTime=30000`, {
+        const submitRes = await httpFetch(`${VERIF_BASE}/email-validations?waitTime=30000`, {
           method: 'POST',
           headers,
           body: JSON.stringify({ entries: chunk.map(e => ({ inputData: e })) }),
@@ -114,7 +115,7 @@ export class VerifaliaProvider implements VerifierProvider {
           const id = jobId(job)
           if (!id) break
 
-          const pollRes = await fetch(`${VERIF_BASE}/email-validations/${id}?waitTime=15000`, { headers })
+          const pollRes = await httpFetch(`${VERIF_BASE}/email-validations/${id}?waitTime=15000`, { headers })
           if (!pollRes.ok) break
           job = await pollRes.json() as VerifaliaJob
         }

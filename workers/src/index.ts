@@ -4,6 +4,10 @@
 // stage is `--scale crawl-worker=4`; there is no in-process stage routing and
 // no shared mutable state between replicas beyond Postgres.
 
+// Side-effect import, first: installs Happy Eyeballs so a dead IPv6 route on
+// the host cannot stall every outbound call. See src/net.ts.
+import './net.js'
+
 import { run, type Runner } from 'graphile-worker'
 import { loadConfig, degradedWarnings, ConfigError } from './config.js'
 import { createDb, assertConnectionModes, type Db } from './db.js'

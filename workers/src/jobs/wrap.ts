@@ -12,14 +12,16 @@
 // failure mode was a campaign stuck in `running` with no explanation; this
 // makes the last attempt land somewhere a human is shown.
 
-import type { Helpers, Task } from 'graphile-worker'
+// JobHelpers, not Helpers: only the former carries `job`, which is where the
+// attempt count and job key live.
+import type { JobHelpers, Task } from 'graphile-worker'
 import type { Pool } from 'pg'
 import { metrics } from '../metrics.js'
 import { rootLogger, type Logger } from '../logger.js'
 
 export interface JobContext {
   logger: Logger
-  helpers: Helpers
+  helpers: JobHelpers
   db: Pool
   /** Add to this during the job; it is written to job_runs on completion. */
   cost: { cents: number; detail: Record<string, unknown> }
@@ -135,7 +137,7 @@ async function closeRun(
 }
 
 async function deadLetter(
-  db: Pool, stage: string, payload: BasePayload, helpers: Helpers,
+  db: Pool, stage: string, payload: BasePayload, helpers: JobHelpers,
   error: string, attempts: number, logger: Logger,
 ): Promise<void> {
   try {

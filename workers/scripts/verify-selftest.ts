@@ -14,39 +14,76 @@
 // back `unknown` with a connect error. That is a hosting problem, not a code
 // problem, and the script says so explicitly rather than reporting a failure.
 
+import { networkMode } from '../src/net.js'
 import { VerifySvcProvider } from '../src/verify/verifysvc.js'
 import { VerifaliaProvider } from '../src/verify/verifalia.js'
 import type { VerifierProvider, VerifyResult } from '../src/verify/types.js'
 import { Logger } from '../src/logger.js'
 
+// Fixture choice matters more than it looks.
+//
+// The obvious picks — role addresses at large organisations — are exactly the
+// wrong ones. Measured against Verifalia on 2026-08-16: cloudflare.com is
+// catch-all, github.com accepts unknown recipients, and microsoft.com rejects
+// postmaster/ from outside. On a catch-all domain "deliverable" is unprovable
+// by construction, so scoring those as failures cries wolf.
+//
+// So: the good set is restricted to providers that genuinely reject unknown
+// users, plus your own mailbox when VERIFY_FROM_EMAIL is set — that one is the
+// only address here we can be certain about.
+
 /**
  * Addresses that should verify as deliverable.
  *
- * These are published role addresses at large, stable organisations — chosen
- * because they will still exist next year and because probing them is
- * unremarkable traffic. Do not put a customer's address in here.
+ * Deliberately short. Measured against Verifalia on 2026-08-16, most "obviously
+ * real" public role addresses do NOT verify as deliverable: `abuse@gmail.com`
+ * and `postmaster@yahoo.com` return invalid, `security@apple.com` returns
+ * risky, and cloudflare/github are catch-all. Big providers special-case these
+ * mailboxes, so they make terrible fixtures.
+ *
+ * `postmaster@gmail.com` is the one public address that reliably verifies.
+ * For a real positive set, point SELFTEST_GOOD_EMAILS at mailboxes you own —
+ * those are the only ones whose expected answer you actually know.
  */
 const KNOWN_GOOD = [
   'postmaster@gmail.com',
-  'abuse@cloudflare.com',
-  'security@github.com',
-  'postmaster@microsoft.com',
-  'hostmaster@ietf.org',
 ]
+
+/** Operator-supplied known-deliverable addresses, comma separated. */
+function operatorGood(): string[] {
+  return (process.env.SELFTEST_GOOD_EMAILS ?? '')
+    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+}
 
 /**
  * Addresses that should NOT verify.
  *
- * The first four are random local parts on real, non-catch-all domains; the
- * last is a domain with no MX at all, which should fail before any SMTP.
+ * Random local parts on providers known to reject unknown users, plus two
+ * domains that cannot receive mail at all — those must fail at the MX stage,
+ * before any SMTP connection, which is also how we confirm the MX short-circuit
+ * works.
  */
 const KNOWN_BAD = [
   'definitely-not-a-real-mailbox-9f2a@gmail.com',
-  'no-such-user-here-7c1d@github.com',
-  'this-does-not-exist-4b8e@ietf.org',
-  'nonexistent-mailbox-2a6f@cloudflare.com',
-  'anyone@example.com',
+  'no-such-user-here-7c1d@outlook.com',
+  'this-does-not-exist-4b8e@yahoo.com',
+  'anyone@example.com',                       // reserved, no MX
+  'someone@nonexistent-domain-zz9f2a.invalid', // reserved TLD, cannot resolve
 ]
+
+/**
+ * VERIFY_FROM_EMAIL is included on purpose, and its result is load-bearing.
+ *
+ * It is the MAIL FROM address verify-svc uses on every probe. Some receiving
+ * servers verify the sender before answering RCPT, so if this address is not
+ * deliverable the whole verifier degrades — silently, and only against the
+ * strictest providers, which are the ones that matter most. Checking it here
+ * turns that into a visible line in the self-test.
+ */
+function ownMailbox(): string[] {
+  const own = (process.env.VERIFY_FROM_EMAIL ?? '').trim().toLowerCase()
+  return own ? [own] : []
+}
 
 interface Row {
   email: string
@@ -59,10 +96,18 @@ function pad(s: string, n: number): string {
   return s.length >= n ? s.slice(0, n) : s + ' '.repeat(n - s.length)
 }
 
-/** A result matches expectation if safe↔deliverable, invalid↔undeliverable. */
+/**
+ * Score a verdict against expectation.
+ *
+ * `null` means "no opinion possible", and it is not a failure:
+ *   - `unknown`   the provider declined to answer
+ *   - catch-all   the domain accepts everything, so neither answer is provable
+ * Counting either as wrong is how a self-test starts lying.
+ */
 function verdictMatches(expected: Row['expected'], result?: VerifyResult): boolean | null {
   if (!result) return null
-  if (result.status === 'unknown') return null      // no opinion, not a failure
+  if (result.status === 'unknown') return null
+  if (result.is_catch_all) return null
   if (expected === 'deliverable') return result.status === 'safe'
   return result.status === 'invalid'
 }
@@ -90,14 +135,16 @@ async function main() {
   const only = process.argv.find(a => a.startsWith('--provider='))?.split('=')[1]
   const logger = new Logger((process.env.LOG_LEVEL as 'info') ?? 'warn')
 
-  const emails = [...KNOWN_GOOD, ...KNOWN_BAD]
+  const good = [...ownMailbox(), ...operatorGood(), ...KNOWN_GOOD]
+  const emails = [...good, ...KNOWN_BAD]
   const rows: Row[] = [
-    ...KNOWN_GOOD.map(email => ({ email, expected: 'deliverable' as const })),
+    ...good.map(email => ({ email, expected: 'deliverable' as const })),
     ...KNOWN_BAD.map(email => ({ email, expected: 'undeliverable' as const })),
   ]
 
   console.log(`\nVerifier self-test — ${emails.length} addresses ` +
-              `(${KNOWN_GOOD.length} good, ${KNOWN_BAD.length} bad)\n`)
+              `(${good.length} good, ${KNOWN_BAD.length} bad)`)
+  console.log(`network: ${networkMode()}\n`)
 
   // ── verify-svc ─────────────────────────────────────────────────────────────
   let svcNote = ''
@@ -163,10 +210,20 @@ async function main() {
   }
 
   console.log('-'.repeat(105))
-  console.log(`verify-svc : ${svcCorrect}/${svcAnswered} correct ` +
-              `(${rows.length - svcAnswered} unknown)`)
-  console.log(`verifalia  : ${vfCorrect}/${vfAnswered} correct ` +
-              `(${rows.length - vfAnswered} unknown)`)
+
+  // "answered" is the plumbing check: did the provider return a verdict at all.
+  // "scored" excludes catch-all domains, where no verdict is provable.
+  const svcVerdicts = rows.filter(r => r.svc && r.svc.status !== 'unknown').length
+  const vfVerdicts = rows.filter(r => r.verifalia && r.verifalia.status !== 'unknown').length
+  const svcRan = rows.filter(r => r.svc).length
+  const vfRan = rows.filter(r => r.verifalia).length
+
+  console.log(`verify-svc : ${svcCorrect}/${svcAnswered} scored correct · ` +
+              `${svcVerdicts}/${svcRan} answered · ` +
+              `${svcRan - svcAnswered} unscoreable (unknown or catch-all)`)
+  console.log(`verifalia  : ${vfCorrect}/${vfAnswered} scored correct · ` +
+              `${vfVerdicts}/${vfRan} answered · ` +
+              `${vfRan - vfAnswered} unscoreable (unknown or catch-all)`)
   if (bothAnswered) {
     console.log(`agreement  : ${agree}/${bothAnswered} ` +
                 `(${Math.round((agree / bothAnswered) * 100)}%)`)
@@ -186,6 +243,18 @@ async function main() {
       '   Until it is open, run VERIFIER=verifalia.',
     )
     process.exit(0)
+  }
+
+  const from = (process.env.VERIFY_FROM_EMAIL ?? '').trim().toLowerCase()
+  const fromRow = rows.find(r => r.email === from)
+  const fromVerdict = fromRow?.verifalia ?? fromRow?.svc
+  if (from && fromVerdict && fromVerdict.status === 'invalid') {
+    console.log(
+      `\n⚠  VERIFY_FROM_EMAIL (${from}) is NOT deliverable.\n` +
+      '   It is the MAIL FROM on every SMTP probe. Receivers that verify the\n' +
+      '   sender before answering RCPT will refuse us — and those are the strict\n' +
+      '   providers whose verdicts matter most. Create this mailbox before\n' +
+      '   relying on verify-svc.')
   }
 
   if (svcNote) console.log(`\nnote: ${svcNote}`)
