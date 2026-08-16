@@ -9,21 +9,24 @@ Deno.serve(async (req) => {
     Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
   )
 
-  // Try to get user from JWT; fall back to the first (only) user in the system
-  const authHeader = req.headers.get('Authorization')
-  let userId: string | undefined
-  if (authHeader) {
-    const { data: { user } } = await createClient(
-      Deno.env.get('SUPABASE_URL')!,
-      Deno.env.get('SUPABASE_ANON_KEY')!,
-    ).auth.getUser(authHeader.replace('Bearer ', ''))
-    userId = user?.id
-  }
-  if (!userId) {
-    const { data: { users } } = await supabase.auth.admin.listUsers({ perPage: 1 })
-    userId = users?.[0]?.id
-  }
-  if (!userId) return errorResponse('No user found', 500)
+  // The caller's identity comes from their JWT and nowhere else.
+  //
+  // This used to fall back to `listUsers({ perPage: 1 })` — "the first user in
+  // the system" — whenever the token was missing or unreadable. With a single
+  // account that looked like a convenience; with two it silently files one
+  // user's campaign under another user's id, and an unauthenticated caller
+  // gets a campaign created for whoever happens to be first. No fallback.
+  const authHeader = req.headers.get('Authorization') ?? ''
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : ''
+  if (!token) return errorResponse('Missing bearer token', 401)
+
+  const { data: { user }, error: authError } = await createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_ANON_KEY')!,
+  ).auth.getUser(token)
+
+  if (authError || !user?.id) return errorResponse('Invalid or expired token', 401)
+  const userId = user.id
 
   const body = await req.json().catch(() => ({}))
   const { niche, location, count } = body as { niche?: string; location?: string; count?: number }

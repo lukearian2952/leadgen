@@ -1,0 +1,52 @@
+# SearXNG for the serp-worker.
+#
+# Configured as a JSON API, not a public search page: no UI users, one caller,
+# and every query cached for 30 days in `serp_cache` so repeat campaigns cost
+# nothing.
+
+use_default_settings: true
+
+general:
+  instance_name: "leadgen-serp"
+  # No public instance, no need to advertise.
+  enable_metrics: true
+
+server:
+  # Overridden by SEARXNG_SECRET from the environment.
+  secret_key: "change-me"
+  limiter: false          # single trusted caller; the limiter would throttle us
+  image_proxy: false
+  method: "GET"
+
+search:
+  # JSON is what the worker consumes; html is kept for eyeballing a query by
+  # hand when a result set looks wrong.
+  formats:
+    - json
+    - html
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en-US"
+
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 20.0
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true
+
+engines:
+  # Discovery quality depends on Google and Bing being present; the rest are
+  # noise for our query shapes and are disabled to keep latency down.
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: wikipedia
+    disabled: true
+  - name: wikidata
+    disabled: true

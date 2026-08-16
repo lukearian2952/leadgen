@@ -1,0 +1,201 @@
+# LeadGen v2 worker fleet.
+#
+#   docker compose up -d                      # everything
+#   docker compose up -d --scale crawl-worker=4
+#   docker compose logs -f verify-svc
+#
+# Postgres is Supabase's, not ours — there is no postgres service here. pgbouncer
+# sits in front of it so worker replicas do not exhaust Supabase's connection
+# limit, and every worker also holds one session-mode connection straight to
+# Supabase for graphile-worker's LISTEN/NOTIFY. See docs/ENV.md.
+
+x-worker-base: &worker-base
+  build:
+    context: ./workers
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  depends_on:
+    pgbouncer:
+      condition: service_started
+  environment: &worker-env
+    DATABASE_URL: postgres://${SUPABASE_DB_USER}:${SUPABASE_DB_PASSWORD}@pgbouncer:6432/${SUPABASE_DB_NAME}
+    DATABASE_URL_DIRECT: ${DATABASE_URL_DIRECT}
+    SUPABASE_URL: ${SUPABASE_URL}
+    SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    DECODO_USERNAME: ${DECODO_USERNAME}
+    DECODO_PASSWORD: ${DECODO_PASSWORD}
+    DECODO_HOST: ${DECODO_HOST}
+    DECODO_PORT: ${DECODO_PORT}
+    DECODO_STICKY_TTL: ${DECODO_STICKY_TTL:-600}
+    SEARXNG_URL: http://searxng:8080
+    CRAWL4AI_URL: http://crawl4ai:11235
+    GOOGLE_MAPS_SCRAPER_URL: http://maps-scraper:8080
+    GOOGLE_PLACES_API_KEY: ${GOOGLE_PLACES_API_KEY}
+    SOCRATA_APP_TOKEN: ${SOCRATA_APP_TOKEN}
+    VERIFY_URL: http://host.docker.internal:8080
+    VERIFY_IPS: ${VERIFY_IPS}
+    VERIFY_HELO_DOMAIN: ${VERIFY_HELO_DOMAIN}
+    VERIFY_FROM_EMAIL: ${VERIFY_FROM_EMAIL}
+    VERIFIER: ${VERIFIER:-hybrid}
+    VERIFALIA_USERNAME: ${VERIFALIA_USERNAME}
+    VERIFALIA_PASSWORD: ${VERIFALIA_PASSWORD}
+    VERIFALIA_MAX_CENTS_PER_CAMPAIGN: ${VERIFALIA_MAX_CENTS_PER_CAMPAIGN:-500}
+    LINKEDIN_ACCOUNTS: ${LINKEDIN_ACCOUNTS}
+    WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+    LOG_LEVEL: ${LOG_LEVEL:-info}
+    METRICS_PORT: 9100
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+services:
+  # ── connection pooling ──────────────────────────────────────────────────────
+  #
+  # Transaction mode: many short worker queries share few server connections.
+  # This is why graphile-worker cannot use it (no LISTEN/NOTIFY) and gets its
+  # own direct connection instead.
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.23.1-p2
+    restart: unless-stopped
+    environment:
+      DB_HOST: ${SUPABASE_DB_HOST}
+      DB_PORT: ${SUPABASE_DB_PORT:-5432}
+      DB_USER: ${SUPABASE_DB_USER}
+      DB_PASSWORD: ${SUPABASE_DB_PASSWORD}
+      DB_NAME: ${SUPABASE_DB_NAME}
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 200
+      DEFAULT_POOL_SIZE: 20
+      AUTH_TYPE: scram-sha-256
+      # Server-side prepared statements are incompatible with transaction
+      # pooling; node-postgres only prepares named queries, and we issue none.
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits,options
+    ports:
+      - "127.0.0.1:6432:6432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U ${SUPABASE_DB_USER}"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  # ── verification ────────────────────────────────────────────────────────────
+  #
+  # host networking is required: the prober binds outbound connections to
+  # specific public IPs (VERIFY_IPS), which is impossible from inside Docker's
+  # default bridge network. This is also why it is not on the app network.
+  verify-svc:
+    build:
+      context: ./verify-svc
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      DATABASE_URL: ${DATABASE_URL_DIRECT}
+      VERIFY_IPS: ${VERIFY_IPS}
+      VERIFY_HELO_DOMAIN: ${VERIFY_HELO_DOMAIN}
+      VERIFY_FROM_EMAIL: ${VERIFY_FROM_EMAIL}
+      PORT: "8080"
+
+  # ── SERP ────────────────────────────────────────────────────────────────────
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
+      SEARXNG_SECRET: ${SEARXNG_SECRET}
+    ports:
+      - "127.0.0.1:8888:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  # ── crawling ────────────────────────────────────────────────────────────────
+  crawl4ai:
+    image: unclecode/crawl4ai:latest
+    restart: unless-stopped
+    shm_size: 1gb
+    environment:
+      # crawl4ai routes browser traffic through this when set.
+      PROXY_SERVER: http://${DECODO_HOST}:${DECODO_PORT}
+      PROXY_USERNAME: ${DECODO_USERNAME}
+      PROXY_PASSWORD: ${DECODO_PASSWORD}
+    ports:
+      - "127.0.0.1:11235:11235"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:11235/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ── Google Maps ─────────────────────────────────────────────────────────────
+  maps-scraper:
+    image: gosom/google-maps-scraper:latest
+    restart: unless-stopped
+    command: ["-web", "-addr", ":8080", "-c", "4"]
+    ports:
+      - "127.0.0.1:8085:8080"
+
+  # ── workers, one per role ───────────────────────────────────────────────────
+  maps-worker:
+    <<: *worker-base
+    environment:
+      <<: *worker-env
+      WORKER_ROLE: maps
+    ports: ["127.0.0.1:9101:9100"]
+
+  serp-worker:
+    <<: *worker-base
+    environment:
+      <<: *worker-env
+      WORKER_ROLE: serp
+    ports: ["127.0.0.1:9102:9100"]
+
+  crawl-worker:
+    <<: *worker-base
+    environment:
+      <<: *worker-env
+      WORKER_ROLE: crawl
+    # No fixed host port: this one is scaled with --scale, and a fixed mapping
+    # would collide on the second replica.
+    expose: ["9100"]
+
+  linkedin-worker:
+    <<: *worker-base
+    environment:
+      <<: *worker-env
+      WORKER_ROLE: linkedin
+    ports: ["127.0.0.1:9104:9100"]
+
+  registry-worker:
+    <<: *worker-base
+    environment:
+      <<: *worker-env
+      WORKER_ROLE: registry
+    ports: ["127.0.0.1:9105:9100"]
+
+  enrich-worker:
+    <<: *worker-base
+    environment:
+      <<: *worker-env
+      WORKER_ROLE: enrich
+    expose: ["9100"]
+
+  verify-worker:
+    <<: *worker-base
+    environment:
+      <<: *worker-env
+      WORKER_ROLE: verify
+    ports: ["127.0.0.1:9107:9100"]
+
+  scheduler:
+    <<: *worker-base
+    environment:
+      <<: *worker-env
+      WORKER_ROLE: scheduler
+      # The reconcile loop must be a singleton; never scale this service.
+      WORKER_CONCURRENCY: 1
+    ports: ["127.0.0.1:9108:9100"]
