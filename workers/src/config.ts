@@ -48,6 +48,10 @@ const SPECS: VarSpec[] = [
   { name: 'DECODO_PASSWORD', requiredFor: ['maps', 'serp', 'crawl', 'linkedin'] },
   { name: 'DECODO_HOST',     requiredFor: ['maps', 'serp', 'crawl', 'linkedin'] },
   { name: 'DECODO_PORT',     requiredFor: ['maps', 'serp', 'crawl', 'linkedin'] },
+  { name: 'DECODO_COUNTRY', requiredFor: [],
+    degrades: "exits are global rather than US-targeted — Google will serve a different, localised result set" },
+  { name: 'DECODO_STICKY_PORT_MIN', requiredFor: [], degrades: 'defaults to 10001' },
+  { name: 'DECODO_STICKY_PORT_MAX', requiredFor: [], degrades: 'defaults to 10100' },
   { name: 'DECODO_STICKY_TTL', requiredFor: [],
     degrades: 'sticky sessions default to 600s' },
 
@@ -118,7 +122,13 @@ export interface Config {
     username: string
     password: string
     host: string
-    port: number
+    /** Rotating endpoint. Decodo uses 7000; a new IP on every request. */
+    rotatingPort: number
+    /** Sticky sessions are addressed by PORT, not by a username suffix. */
+    stickyPortMin: number
+    stickyPortMax: number
+    /** ISO country for exit targeting, e.g. 'us'. Empty disables targeting. */
+    country: string
     stickyTtlSeconds: number
   }
   searxngUrl: string
@@ -214,7 +224,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       username: env.DECODO_USERNAME ?? '',
       password: env.DECODO_PASSWORD ?? '',
       host:     env.DECODO_HOST ?? '',
-      port:     Number(env.DECODO_PORT ?? 0),
+      rotatingPort:  Number(env.DECODO_PORT ?? 7000),
+      stickyPortMin: Number(env.DECODO_STICKY_PORT_MIN ?? 10001),
+      stickyPortMax: Number(env.DECODO_STICKY_PORT_MAX ?? 10100),
+      country: (env.DECODO_COUNTRY ?? 'us').trim().toLowerCase(),
       stickyTtlSeconds: Number(env.DECODO_STICKY_TTL ?? 600),
     },
     searxngUrl:         env.SEARXNG_URL ?? '',
