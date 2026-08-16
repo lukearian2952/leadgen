@@ -80,10 +80,22 @@ type Config struct {
 	FromEmail  string
 }
 
+// IPStore is the subset of ipstate.Store the prober uses.
+//
+// An interface rather than the concrete type because *ipstate.Store owns a
+// pgxpool, and requiring a live Postgres to assert "three dial failures back
+// this MX off" would make the rules that matter most the ones least tested.
+// *ipstate.Store satisfies this as written.
+type IPStore interface {
+	Choose(ctx context.Context, ips []string, mxHost string) (ipstate.Decision, error)
+	RecordCheck(ctx context.Context, ip string) error
+	Cool(ctx context.Context, ip, reason string) error
+}
+
 // Prober verifies addresses under per-MX serialisation and per-IP limits.
 type Prober struct {
 	cfg      Config
-	ips      *ipstate.Store
+	ips      IPStore
 	verifier *emailverifier.Verifier
 
 	// One in-flight connection per MX host, as required. A mutex per host
@@ -92,10 +104,35 @@ type Prober struct {
 	mxLocks sync.Map // map[string]*sync.Mutex
 	// Last time we opened a connection to each MX host, for pacing.
 	lastConn sync.Map // map[string]time.Time
+
+	failures *failureTracker
+	sem      *ipSemaphore
+
+	// ── Test seams ────────────────────────────────────────────────────────────
+	//
+	// These exist so the connection-level rules can be asserted against a fake
+	// SMTP server instead of a live mailbox provider. Without them the only way
+	// to test "stop at the first safe address issues exactly one RCPT" is to
+	// probe a real domain, which is neither repeatable nor polite.
+
+	// smtpPort is the port dialled on the MX host. "25" in production.
+	smtpPort string
+	// lookupMX resolves a domain to its primary MX host. Defaults to the
+	// library's CheckMX.
+	lookupMX func(domain string) (host string, hasMX bool, err error)
+	// now is the clock, so backoff windows can be tested without sleeping.
+	now func() time.Time
+	// pacing disables the inter-connection and inter-RCPT sleeps in tests. A
+	// test that honoured the real 12 s connection gap and 3–5 s RCPT gap would
+	// take minutes.
+	pacing bool
 }
 
 // waitForMXSlot paces new connections to one MX host.
 func (p *Prober) waitForMXSlot(ctx context.Context, mxHost string) {
+	if !p.pacing {
+		return
+	}
 	if v, ok := p.lastConn.Load(mxHost); ok {
 		if elapsed := time.Since(v.(time.Time)); elapsed < minConnGapPerMX {
 			select {
@@ -107,13 +144,40 @@ func (p *Prober) waitForMXSlot(ctx context.Context, mxHost string) {
 	p.lastConn.Store(mxHost, time.Now())
 }
 
-func New(cfg Config, ips *ipstate.Store) *Prober {
+func New(cfg Config, ips IPStore) *Prober {
 	// SMTP checking is done by this package, so the library is configured for
 	// metadata only. EnableSMTPCheck is deliberately NOT set.
 	v := emailverifier.NewVerifier().
 		EnableDomainSuggest()
 
-	return &Prober{cfg: cfg, ips: ips, verifier: v}
+	p := &Prober{
+		cfg:      cfg,
+		ips:      ips,
+		verifier: v,
+		failures: newFailureTracker(),
+		sem:      newIPSemaphore(),
+		smtpPort: "25",
+		now:      time.Now,
+		pacing:   true,
+	}
+	p.lookupMX = p.defaultLookupMX
+	return p
+}
+
+// defaultLookupMX is the production MX resolver.
+func (p *Prober) defaultLookupMX(domain string) (string, bool, error) {
+	mx, err := p.verifier.CheckMX(domain)
+	if err != nil || mx == nil || !mx.HasMXRecord {
+		return "", false, err
+	}
+	return primaryMX(mx), true, nil
+}
+
+// Stats reports live counters for /metrics.
+func (p *Prober) Stats() Stats {
+	s := p.failures.stats(p.now())
+	s.InFlight = p.sem.current()
+	return s
 }
 
 func (p *Prober) lockFor(mx string) *sync.Mutex {
@@ -167,8 +231,8 @@ func (p *Prober) Verify(ctx context.Context, emails []string) ([]Result, error) 
 	domainsBlocked := 0
 
 	for domain, addrs := range byDomain {
-		mx, err := p.verifier.CheckMX(domain)
-		if err != nil || mx == nil || !mx.HasMXRecord {
+		host, hasMX, err := p.lookupMX(domain)
+		if err != nil || !hasMX {
 			// A definitive answer that costs no SMTP, so it does not count
 			// toward the cooling tally either way.
 			for _, e := range addrs {
@@ -177,8 +241,6 @@ func (p *Prober) Verify(ctx context.Context, emails []string) ([]Result, error) 
 			}
 			continue
 		}
-
-		host := primaryMX(mx)
 
 		// RFC 7505 null MX: a single record of "." means the domain publishes,
 		// explicitly, that it accepts no mail. The library reports
@@ -237,6 +299,20 @@ func (p *Prober) probeDomain(
 	lock.Lock()
 	defer lock.Unlock()
 
+	// An MX host in its backoff window is not dialled at all. Answering
+	// `unknown` immediately is both cheaper and kinder than opening a connection
+	// we have good reason to believe will hang for the full dial timeout.
+	if backedOff, until := p.failures.backedOff(mxHost, p.now()); backedOff {
+		for _, e := range addrs {
+			results[e].Status = StatusUnknown
+			results[e].Detail = fmt.Sprintf(
+				"MX %s backed off after %d consecutive dial failures; retry after %s",
+				mxHost, mxConsecutiveFailLimit, until.UTC().Format(time.RFC3339))
+			results[e].Transient = true
+		}
+		return false, nil
+	}
+
 	decision, err := p.ips.Choose(ctx, p.cfg.IPs, mxHost)
 	if err != nil {
 		return false, err
@@ -254,8 +330,20 @@ func (p *Prober) probeDomain(
 		return false, nil
 	}
 
+	// Cap simultaneous port-25 connections from this source IP.
+	if err := p.sem.acquire(ctx, decision.IP); err != nil {
+		for _, e := range addrs {
+			results[e].Status = StatusUnknown
+			results[e].Detail = "cancelled waiting for a connection slot"
+			results[e].Transient = true
+		}
+		return false, nil
+	}
+	defer p.sem.release(decision.IP)
+
 	started := time.Now()
 	p.waitForMXSlot(ctx, mxHost)
+	p.failures.recordAttempt()
 	session, err := p.dial(ctx, decision.IP, mxHost)
 	if err != nil {
 		reason := err.Error()
@@ -263,13 +351,39 @@ func (p *Prober) probeDomain(
 			_ = p.ips.Cool(ctx, decision.IP, reason)
 			return true, nil
 		}
+
+		// A dial that never completed carries no SMTP code, so IsBlockResponse
+		// cannot see it. This is where a black-holed port 25 gets noticed.
+		outcome := p.failures.recordFailure(mxHost, p.now())
+
+		detail := "connect failed: " + truncate(reason, 200)
+		if outcome.MXBackedOff {
+			detail += fmt.Sprintf(" — %d consecutive failures, %s backed off for %s",
+				outcome.Consecutive, mxHost, mxBackoffDuration)
+		}
+
+		if outcome.CoolIP {
+			// Failures are spread across MX hosts, so the IP is the common
+			// factor. Cool it and tell the caller to use the paid fallback.
+			_ = p.ips.Cool(ctx, decision.IP, fmt.Sprintf(
+				"%d dial failures within %s across MX hosts (last: %s)",
+				outcome.InWindow, ipFailWindow, truncate(reason, 120)))
+			for _, e := range addrs {
+				results[e].Status = StatusUnknown
+				results[e].Detail = detail + " — IP cooling, routing to fallback"
+				results[e].Transient = true
+			}
+			return true, ErrAllCooling
+		}
+
 		for _, e := range addrs {
 			results[e].Status = StatusUnknown
-			results[e].Detail = "connect failed: " + truncate(reason, 200)
+			results[e].Detail = detail
 			results[e].Transient = true
 		}
 		return false, nil
 	}
+	p.failures.recordSuccess(mxHost)
 	// Closes whichever session is current at return. A plain `defer
 	// session.close()` would bind the original pointer and leak the connection
 	// opened by the reconnect below.
@@ -308,17 +422,24 @@ func (p *Prober) probeDomain(
 	for _, email := range addrs {
 		if sent >= maxRCPTPerConn {
 			session.close()
-			jitterSleep(ctx)
+			p.jitterSleep(ctx)
+			p.failures.recordAttempt()
 			session, err = p.dial(ctx, decision.IP, mxHost)
 			if err != nil {
+				// A failed reconnect is a failed dial like any other and has to
+				// count toward the thresholds, or a domain with many candidates
+				// could absorb an unlimited number of them unnoticed.
+				p.failures.recordFailure(mxHost, p.now())
 				results[email].Status = StatusUnknown
 				results[email].Detail = "reconnect failed"
+				results[email].Transient = true
 				continue
 			}
+			p.failures.recordSuccess(mxHost)
 			sent = 0
 		}
 
-		jitterSleep(ctx)
+		p.jitterSleep(ctx)
 		addrStarted := time.Now()
 		ok, reply, rcptErr := session.rcpt(email)
 		sent++
@@ -404,7 +525,10 @@ func primaryMX(mx *emailverifier.Mx) string {
 }
 
 // jitterSleep waits 3–5 s, the mandated inter-RCPT gap.
-func jitterSleep(ctx context.Context) {
+func (p *Prober) jitterSleep(ctx context.Context) {
+	if !p.pacing {
+		return
+	}
 	d := minRCPTGap + time.Duration(rand.Int63n(int64(maxRCPTGap-minRCPTGap)))
 	select {
 	case <-ctx.Done():
@@ -458,7 +582,11 @@ func (p *Prober) dial(ctx context.Context, localIP, mxHost string) (*session, er
 		LocalAddr: &net.TCPAddr{IP: local},
 	}
 
-	conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(mxHost, "25"))
+	port := p.smtpPort
+	if port == "" {
+		port = "25"
+	}
+	conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(mxHost, port))
 	if err != nil {
 		return nil, fmt.Errorf("dial %s from %s over %s: %w", mxHost, localIP, network, err)
 	}

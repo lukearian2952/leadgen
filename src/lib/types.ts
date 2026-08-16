@@ -81,3 +81,23 @@ export interface CampaignLog {
   message: string
   created_at: string
 }
+
+/**
+ * An operator-visible condition that must not degrade silently.
+ *
+ * `campaign_id` is null for fleet-wide conditions — a verifier out of credits
+ * affects every run, not the one that happened to notice it first.
+ */
+export interface Alert {
+  id: string
+  campaign_id: string | null
+  user_id: string | null
+  kind: string
+  severity: 'info' | 'warning' | 'error'
+  message: string
+  detail: Record<string, unknown>
+  occurrences: number
+  first_seen_at: string
+  last_seen_at: string
+  acknowledged_at: string | null
+}

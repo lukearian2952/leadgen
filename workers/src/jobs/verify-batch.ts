@@ -13,6 +13,7 @@ import { HybridVerifier, type BudgetLedger, type Candidate } from '../verify/hyb
 import { VerifySvcProvider } from '../verify/verifysvc.js'
 import { VerifaliaProvider } from '../verify/verifalia.js'
 import type { VerifierProvider, VerifyResult } from '../verify/types.js'
+import { PgAlertSink } from '../verify/alerts.js'
 import type { Logger } from '../logger.js'
 import type { Config } from '../config.js'
 
@@ -50,29 +51,33 @@ export class PgBudgetLedger implements BudgetLedger {
   }
 }
 
-export function buildVerifier(config: Config, db: Pool, logger: Logger) {
-  const svc = new VerifySvcProvider(config.verify.url, logger)
+export function buildVerifier(config: Config, db: Pool, logger: Logger, campaignId?: string) {
+  const alerts = new PgAlertSink(db, logger)
+  const ledger = new PgBudgetLedger(db)
+
+  const svc = new VerifySvcProvider(config.verify.url, logger, 180_000, alerts)
   const verifalia = new VerifaliaProvider(
-    config.verifalia.username, config.verifalia.password, logger,
+    config.verifalia.username, config.verifalia.password, logger, 90_000,
+    alerts, campaignId ?? null,
   )
 
   // VERIFIER selects the topology. 'reacher' is retained as an alias for the
   // self-hosted provider so existing config keeps working after the swap from
   // Reacher to verify-svc.
   if (config.verifier === 'verifalia') {
+    // Verifalia is the *paid* primary here, so the per-campaign cap has to
+    // apply to it. Passing primaryIsPaid=false would let a run spend without
+    // limit — and this is the mode in use while port 25 is blocked.
     return new HybridVerifier(
-      verifalia, noopProvider(), new PgBudgetLedger(db),
-      config.verifalia.maxCentsPerCampaign, logger,
+      verifalia, noopProvider(), ledger,
+      config.verifalia.maxCentsPerCampaign, logger, true,
     )
   }
   if (config.verifier === 'reacher') {
-    return new HybridVerifier(
-      svc, noopProvider(), new PgBudgetLedger(db), 0, logger,
-    )
+    return new HybridVerifier(svc, noopProvider(), ledger, 0, logger, false)
   }
   return new HybridVerifier(
-    svc, verifalia, new PgBudgetLedger(db),
-    config.verifalia.maxCentsPerCampaign, logger,
+    svc, verifalia, ledger, config.verifalia.maxCentsPerCampaign, logger, false,
   )
 }
 
@@ -96,7 +101,7 @@ export function makeVerifyBatchTask(deps: TaskDeps): Task {
       return
     }
 
-    const verifier = buildVerifier(config, db, ctx.logger)
+    const verifier = buildVerifier(config, db, ctx.logger, campaignId)
     const outcome = await verifier.verify(campaignId, candidates)
 
     ctx.cost.cents = outcome.stats.spendCents
@@ -106,6 +111,8 @@ export function makeVerifyBatchTask(deps: TaskDeps): Task {
       both_ran:          outcome.stats.bothRan,
       agreed:            outcome.stats.agreed,
       budget_exhausted:  outcome.stats.budgetExhausted,
+      by_provider:       outcome.stats.byProvider,
+      rerouted_to_fallback: outcome.stats.reroutedToFallback,
     }
 
     await db.query(

@@ -95,7 +95,7 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
     const highTrust = ['registry', 'linkedin'].some(s => lead.owner_source.includes(s))
     const candidates: Candidate[] = toCheck.map(email => ({ email, highTrustName: highTrust }))
 
-    const verifier = buildVerifier(config, db, ctx.logger)
+    const verifier = buildVerifier(config, db, ctx.logger, campaignId)
     const outcome = await verifier.verify(campaignId, candidates)
     const byEmail = new Map(outcome.results.map(r => [r.email, r]))
 

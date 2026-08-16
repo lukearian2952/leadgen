@@ -2,12 +2,14 @@ import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Play } from 'lucide-react'
 import { useCampaignDetail } from '../hooks/useCampaignDetail'
+import { useAlerts } from '../hooks/useAlerts'
 import { useCampaignRunner } from '../hooks/useCampaignRunner'
 import { StepProgress } from '../components/campaign/StepProgress'
 import { CampaignStats } from '../components/campaign/CampaignStats'
 import { LogsPanel } from '../components/campaign/LogsPanel'
 import { LeadsTable } from '../components/campaign/LeadsTable'
 import { ExportButton } from '../components/campaign/ExportButton'
+import { AlertBanner } from '../components/campaign/AlertBanner'
 import { StatusBadge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
@@ -16,6 +18,7 @@ export function CampaignDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const { campaign, leads, logs, loading } = useCampaignDetail(id!)
+  const { alerts, acknowledge } = useAlerts(id)
   const { run, resume } = useCampaignRunner()
   const [resuming, setResuming] = useState(false)
   const [resumeError, setResumeError] = useState<string | null>(null)
@@ -102,6 +105,14 @@ export function CampaignDetailPage() {
           )}
         </div>
       </div>
+
+      {/* Alerts — above the funnel, because a broken verifier invalidates
+          everything below it rather than showing up as a failure. */}
+      {alerts.length > 0 && (
+        <div className="mb-6">
+          <AlertBanner alerts={alerts} onAcknowledge={acknowledge} />
+        </div>
+      )}
 
       {/* Step progress */}
       <div className="mb-8 overflow-x-auto">

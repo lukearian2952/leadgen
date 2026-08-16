@@ -19,6 +19,16 @@ export interface VerifyResult {
   cost_cents: number
   /** Present when the provider explained itself — SMTP banner, error text. */
   detail?: string
+  /**
+   * True when the provider could not run at all, as distinct from running and
+   * reaching no conclusion.
+   *
+   * Both come back as `unknown`, and conflating them is what let a fleet-wide
+   * outage look like a batch of inconclusive mailboxes. Only the first should
+   * reroute the whole batch to the paid fallback; the second is a real verdict
+   * and rerouting it wastes credits on addresses already judged.
+   */
+  unavailable?: boolean
 }
 
 export interface VerifierProvider {

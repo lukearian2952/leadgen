@@ -12,6 +12,9 @@ import type { VerifierProvider, VerifyResult, VerifyStatus } from './types.js'
 import { httpFetch } from '../net.js'
 import type { Logger } from '../logger.js'
 import { metrics } from '../metrics.js'
+import {
+  ALERT_VERIFALIA_AUTH, ALERT_VERIFALIA_PAYMENT, NullAlertSink, type AlertSink,
+} from './alerts.js'
 
 const VERIF_BASE = 'https://api.verifalia.com/v2.5'
 
@@ -69,10 +72,28 @@ export class VerifaliaProvider implements VerifierProvider {
     private readonly password: string,
     private readonly logger: Logger,
     private readonly maxWaitMs = 90_000,
+    private readonly alerts: AlertSink = new NullAlertSink(),
+    /** Set so alerts can name the run they broke. */
+    private readonly campaignId: string | null = null,
   ) {}
 
   async available(): Promise<boolean> {
     return Boolean(this.username && this.password)
+  }
+
+  private async raiseCredentialAlert(status: number, pending: number): Promise<void> {
+    const payment = status === 402
+    await this.alerts.raise({
+      kind: payment ? ALERT_VERIFALIA_PAYMENT : ALERT_VERIFALIA_AUTH,
+      severity: 'error',
+      campaignId: this.campaignId,
+      message: payment
+        ? 'Verifalia is out of credits (HTTP 402). Verification has no fallback — ' +
+          'addresses will stay unverified and cannot reach Tier A until it is topped up.'
+        : 'Verifalia rejected our credentials (HTTP 401). Verification has no fallback ' +
+          'until VERIFALIA_USERNAME / VERIFALIA_PASSWORD are corrected.',
+      detail: { http_status: status, addresses_pending: pending },
+    })
   }
 
   async verify(emails: string[]): Promise<VerifyResult[]> {
@@ -100,6 +121,17 @@ export class VerifaliaProvider implements VerifierProvider {
           body: JSON.stringify({ entries: chunk.map(e => ({ inputData: e })) }),
         })
         if (!submitRes.ok) {
+          // 402 and 401 are not transient and not per-address: the safety net
+          // is gone for the whole run. Previously this logged a warning and
+          // continued, which is how an entire Phase 2 run completed with every
+          // candidate `unknown` and no indication why.
+          if (submitRes.status === 402 || submitRes.status === 401) {
+            await this.raiseCredentialAlert(submitRes.status, chunk.length)
+            return deduped.map(e => unavailable(e,
+              submitRes.status === 402
+                ? 'Verifalia out of credits (HTTP 402)'
+                : 'Verifalia rejected our credentials (HTTP 401)'))
+          }
           this.logger.warn('Verifalia submit failed', { status: submitRes.status })
           continue
         }
@@ -161,4 +193,9 @@ function unknown(email: string, detail: string): VerifyResult {
     email, status: 'unknown', is_catch_all: false, is_disposable: false,
     is_role: false, provider: 'verifalia', latency_ms: 0, cost_cents: 0, detail,
   }
+}
+
+/** Unknown because Verifalia itself could not run. Costs nothing. */
+function unavailable(email: string, detail: string): VerifyResult {
+  return { ...unknown(email, detail), unavailable: true }
 }

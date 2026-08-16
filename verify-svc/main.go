@@ -330,6 +330,8 @@ func atoiOr(raw string, fallback int) int {
 
 func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	active, _ := s.ips.ActiveCount(r.Context(), s.cfg.IPs)
+	st := s.prober.Stats()
+
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	fmt.Fprintf(w, `# HELP verifysvc_checks_total Addresses checked.
 # TYPE verifysvc_checks_total counter
@@ -349,10 +351,30 @@ verifysvc_all_cooling_total %d
 # HELP verifysvc_active_ips Currently usable outbound IPs.
 # TYPE verifysvc_active_ips gauge
 verifysvc_active_ips %d
+# HELP verifysvc_dial_attempts_total Outbound port-25 connections attempted.
+# TYPE verifysvc_dial_attempts_total counter
+verifysvc_dial_attempts_total %d
+# HELP verifysvc_dial_failures_total Dials that never completed (timeout, refused, unreachable).
+# TYPE verifysvc_dial_failures_total counter
+verifysvc_dial_failures_total %d
+# HELP verifysvc_mx_backoffs_total MX hosts backed off after consecutive dial failures.
+# TYPE verifysvc_mx_backoffs_total counter
+verifysvc_mx_backoffs_total %d
+# HELP verifysvc_ip_cool_triggers_total Times dial failures across MX hosts cooled an IP.
+# TYPE verifysvc_ip_cool_triggers_total counter
+verifysvc_ip_cool_triggers_total %d
+# HELP verifysvc_mx_backed_off MX hosts currently inside their backoff window.
+# TYPE verifysvc_mx_backed_off gauge
+verifysvc_mx_backed_off %d
+# HELP verifysvc_connections_in_flight Outbound port-25 connections open right now.
+# TYPE verifysvc_connections_in_flight gauge
+verifysvc_connections_in_flight %d
 `,
 		s.checksTotal.Load(), s.safeTotal.Load(), s.invalidTotal.Load(),
 		s.riskyTotal.Load(), s.unknownTotal.Load(),
-		s.batchesTotal.Load(), s.blocksTotal.Load(), active)
+		s.batchesTotal.Load(), s.blocksTotal.Load(), active,
+		st.DialAttempts, st.DialFailures, st.MXBackoffs, st.IPCoolTriggers,
+		st.MXBackedOffNow, st.InFlight)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

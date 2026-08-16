@@ -37,6 +37,14 @@ export interface HybridOutcome {
     /** Addresses where both providers ran, and how often they agreed. */
     bothRan: number
     agreed: number
+    /**
+     * Final verdict count per provider name, for the funnel. Answers "who
+     * actually decided this contact", which `verifySvcChecks` cannot once a
+     * second opinion overrides a first.
+     */
+    byProvider: Record<string, number>
+    /** True when the primary could not run and the batch was rerouted wholesale. */
+    reroutedToFallback: boolean
   }
 }
 
@@ -62,20 +70,80 @@ export class HybridVerifier {
     private readonly ledger: BudgetLedger,
     private readonly maxCentsPerCampaign: number,
     private readonly logger: Logger,
+    /**
+     * True when the *primary* charges per check — i.e. VERIFIER=verifalia.
+     *
+     * The cap used to apply only to the fallback, on the assumption that the
+     * primary is our own free service. Running Verifalia as primary under that
+     * assumption spends without limit, which is exactly the configuration used
+     * while port 25 is blocked.
+     */
+    private readonly primaryIsPaid = false,
   ) {}
 
+  /** How many paid checks the remaining campaign budget allows. */
+  private async affordableChecks(campaignId: string): Promise<number> {
+    const spent = await this.ledger.spentCents(campaignId)
+    return Math.max(0, Math.floor((this.maxCentsPerCampaign - spent) / VERIFALIA_COST_CENTS))
+  }
+
   async verify(campaignId: string, candidates: Candidate[]): Promise<HybridOutcome> {
-    const stats = {
+    const stats: HybridOutcome['stats'] = {
       verifySvcChecks: 0, verifaliaChecks: 0, spendCents: 0,
       budgetExhausted: false, bothRan: 0, agreed: 0,
+      byProvider: {}, reroutedToFallback: false,
     }
     if (!candidates.length) return { results: [], stats }
 
     const byEmail = new Map(candidates.map(c => [c.email.toLowerCase(), c]))
+    const emails = [...byEmail.keys()]
 
     // ── Rule 1: primary sees everything ──────────────────────────────────────
-    const primaryResults = await this.primary.verify([...byEmail.keys()])
-    stats.verifySvcChecks = primaryResults.length
+    let primaryResults: VerifyResult[]
+
+    if (this.primaryIsPaid) {
+      const affordable = await this.affordableChecks(campaignId)
+      if (affordable <= 0) {
+        stats.budgetExhausted = true
+        this.logger.warn('paid primary verifier is over budget — nothing verified', {
+          campaignId, cap: this.maxCentsPerCampaign, wanted: emails.length,
+        })
+        const results = emails.map(e => budgetBlocked(e, this.primary.name))
+        stats.byProvider = tally(results)
+        return { results, stats }
+      }
+
+      const within = emails.slice(0, affordable)
+      const beyond = emails.slice(affordable)
+      if (beyond.length) {
+        stats.budgetExhausted = true
+        this.logger.warn('paid primary verifier capped mid-batch', {
+          campaignId, verified: within.length, skipped: beyond.length,
+        })
+      }
+
+      const ran = await this.primary.verify(within)
+      stats.spendCents = ran.reduce((sum, r) => sum + r.cost_cents, 0)
+      if (stats.spendCents > 0) await this.ledger.record(campaignId, stats.spendCents)
+
+      primaryResults = [...ran, ...beyond.map(e => budgetBlocked(e, this.primary.name))]
+      stats.verifaliaChecks = ran.length
+    } else {
+      primaryResults = await this.primary.verify(emails)
+      stats.verifySvcChecks = primaryResults.length
+    }
+
+    // ── The primary could not run at all ─────────────────────────────────────
+    //
+    // Distinct from "ran and was inconclusive". A fleet condition — every IP
+    // cooling, the service unreachable — invalidates the whole batch, so the
+    // whole batch reroutes rather than the high-trust slice Rule 2 would pick.
+    const allUnavailable = primaryResults.length > 0 && primaryResults.every(r => r.unavailable)
+
+    if (allUnavailable && !this.primaryIsPaid) {
+      const rerouted = await this.rerouteAll(campaignId, primaryResults, stats)
+      if (rerouted) return rerouted
+    }
 
     // ── Rules 2 + 3: who deserves a second opinion ───────────────────────────
     const escalate = primaryResults.filter(result => {
@@ -88,6 +156,7 @@ export class HybridVerifier {
     })
 
     if (!escalate.length) {
+      stats.byProvider = tally(primaryResults)
       return { results: primaryResults, stats }
     }
 
@@ -101,11 +170,14 @@ export class HybridVerifier {
       this.logger.warn('Verifalia budget exhausted for campaign — keeping verify-svc verdicts', {
         campaignId, alreadySpent, cap: this.maxCentsPerCampaign, wanted: escalate.length,
       })
-      return { results: primaryResults.map(flagExhausted), stats }
+      const results = primaryResults.map(flagExhausted)
+      stats.byProvider = tally(results)
+      return { results, stats }
     }
 
     if (!await this.fallback.available()) {
       this.logger.warn('Verifalia unavailable — keeping verify-svc verdicts', { campaignId })
+      stats.byProvider = tally(primaryResults)
       return { results: primaryResults, stats }
     }
 
@@ -118,8 +190,8 @@ export class HybridVerifier {
     if (toEscalate.length < escalate.length) stats.budgetExhausted = true
 
     const secondOpinions = await this.fallback.verify(toEscalate.map(r => r.email))
-    stats.verifaliaChecks = secondOpinions.length
-    stats.spendCents = secondOpinions.reduce((sum, r) => sum + r.cost_cents, 0)
+    stats.verifaliaChecks += secondOpinions.length
+    stats.spendCents += secondOpinions.reduce((sum, r) => sum + r.cost_cents, 0)
     await this.ledger.record(campaignId, stats.spendCents)
 
     const secondByEmail = new Map(secondOpinions.map(r => [r.email.toLowerCase(), r]))
@@ -143,7 +215,75 @@ export class HybridVerifier {
       }
     })
 
+    stats.byProvider = tally(merged)
     return { results: merged, stats }
+  }
+
+  /**
+   * Send an entire batch to the fallback because the primary could not run.
+   *
+   * Returns null when the fallback cannot take it — no credentials, or no
+   * budget — in which case the caller keeps the primary's `unavailable`
+   * verdicts. Those cannot reach Tier A, which is the correct outcome: an
+   * unverified address must never be exported as verified.
+   */
+  private async rerouteAll(
+    campaignId: string, primaryResults: VerifyResult[], stats: HybridOutcome['stats'],
+  ): Promise<HybridOutcome | null> {
+    if (!await this.fallback.available()) {
+      this.logger.error(
+        'primary verifier unavailable and no fallback is configured — batch unverified',
+        undefined, { campaignId, addresses: primaryResults.length })
+      stats.byProvider = tally(primaryResults)
+      return { results: primaryResults, stats }
+    }
+
+    const affordable = await this.affordableChecks(campaignId)
+    if (affordable <= 0) {
+      stats.budgetExhausted = true
+      this.logger.warn('primary unavailable and fallback budget exhausted', {
+        campaignId, cap: this.maxCentsPerCampaign,
+      })
+      const results = primaryResults.map(flagExhausted)
+      stats.byProvider = tally(results)
+      return { results, stats }
+    }
+
+    const emails = primaryResults.map(r => r.email)
+    const within = emails.slice(0, affordable)
+    const beyond = emails.slice(affordable)
+    if (beyond.length) stats.budgetExhausted = true
+
+    this.logger.warn('primary verifier unavailable — rerouting the whole batch to the fallback', {
+      campaignId, rerouted: within.length, overBudget: beyond.length,
+    })
+
+    const fallbackResults = await this.fallback.verify(within)
+    stats.verifaliaChecks += fallbackResults.length
+    stats.spendCents += fallbackResults.reduce((sum, r) => sum + r.cost_cents, 0)
+    if (stats.spendCents > 0) await this.ledger.record(campaignId, stats.spendCents)
+    stats.reroutedToFallback = true
+
+    const byEmail = new Map(fallbackResults.map(r => [r.email.toLowerCase(), r]))
+    const results = primaryResults.map(p => byEmail.get(p.email) ?? flagExhausted(p))
+    stats.byProvider = tally(results)
+    return { results, stats }
+  }
+}
+
+/** Count final verdicts per provider, for the funnel. */
+function tally(results: VerifyResult[]): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const r of results) out[r.provider] = (out[r.provider] ?? 0) + 1
+  return out
+}
+
+/** An address that was never checked because the budget would not cover it. */
+function budgetBlocked(email: string, provider: string): VerifyResult {
+  return {
+    email, status: 'unknown', is_catch_all: false, is_disposable: false,
+    is_role: false, provider, latency_ms: 0, cost_cents: 0,
+    detail: 'verifier_budget_exhausted — not checked', unavailable: true,
   }
 }
 

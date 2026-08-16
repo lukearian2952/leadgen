@@ -9,6 +9,7 @@ import type { VerifierProvider, VerifyResult, VerifyStatus } from './types.js'
 import { httpFetch } from '../net.js'
 import type { Logger } from '../logger.js'
 import { metrics } from '../metrics.js'
+import { ALERT_VERIFIER_COOLING, NullAlertSink, type AlertSink } from './alerts.js'
 
 interface SvcResult {
   email: string
@@ -45,6 +46,7 @@ export class VerifySvcProvider implements VerifierProvider {
     private readonly baseUrl: string,
     private readonly logger: Logger,
     private readonly timeoutMs = 180_000,
+    private readonly alerts: AlertSink = new NullAlertSink(),
   ) {}
 
   async available(): Promise<boolean> {
@@ -79,10 +81,17 @@ export class VerifySvcProvider implements VerifierProvider {
       })
 
       if (res.status === 503) {
-        // All IPs cooling. Report every address as unknown so the hybrid
-        // router escalates rather than treating silence as a verdict.
+        // All IPs cooling. Flagged `unavailable` so the hybrid router reroutes
+        // the entire batch rather than only the high-trust slice: this is a
+        // fleet condition, not a set of inconclusive mailboxes.
         this.logger.warn('verify-svc reports all IPs cooling', { count: deduped.length })
-        return deduped.map(email => unknownResult(email, 'all verifier IPs cooling'))
+        await this.alerts.raise({
+          kind: ALERT_VERIFIER_COOLING,
+          severity: 'warning',
+          message: 'Every outbound verification IP is cooling; routing to the paid fallback.',
+          detail: { addresses: deduped.length },
+        })
+        return deduped.map(email => unavailableResult(email, 'all verifier IPs cooling'))
       }
 
       if (!res.ok) {
@@ -95,7 +104,7 @@ export class VerifySvcProvider implements VerifierProvider {
       // what produced v1's 6.4% bounce rate. Unknown is the honest answer and
       // it cannot pass Tier A.
       this.logger.error('verify-svc call failed', err, { count: deduped.length })
-      return deduped.map(email => unknownResult(email, (err as Error).message))
+      return deduped.map(email => unavailableResult(email, (err as Error).message))
     }
 
     const byEmail = new Map(body.results?.map(r => [r.email.toLowerCase(), r]) ?? [])
@@ -136,4 +145,9 @@ function unknownResult(email: string, detail: string): VerifyResult {
     cost_cents: 0,
     detail,
   }
+}
+
+/** Unknown *because the provider could not run*, which reroutes the batch. */
+function unavailableResult(email: string, detail: string): VerifyResult {
+  return { ...unknownResult(email, detail), unavailable: true }
 }
