@@ -110,20 +110,44 @@ export class MapsSource {
    * immediately — there is nothing to wait for. Everything else keeps polling to
    * the cap.
    */
-  async waitFor(jobId: string, maxMs: number, pollMs = 10_000): Promise<MapsWaitResult> {
-    const deadline = Date.now() + maxMs
+  /**
+   * Wait for a scrape, giving up on *stall* rather than on the clock.
+   *
+   * ── Why a fixed cap was wrong ────────────────────────────────────────────
+   *
+   * The 20-minute cap killed two consecutive "vehicle wrap shop / New York"
+   * attempts. Both times the scraper reached `ok` minutes later with 182 rows —
+   * a perfectly good scrape, discarded because our patience was a constant and
+   * the work was not. A cap tuned to a 30-city run is simply wrong for a
+   * 36-query one, and will be wrong again for the next size.
+   *
+   * So the deadline that matters is now "how long since this job last made
+   * progress". A scrape that is still writing keeps its slot however long it
+   * takes; one that has genuinely wedged is abandoned in `stallMs` instead of
+   * holding a worker for the full cap. `maxMs` remains as a hard backstop so a
+   * pathological job cannot run forever.
+   *
+   * Progress means the download grew. `numOfJobsCompleted` would be a better
+   * signal but the scraper does not expose it per job.
+   */
+  async waitFor(
+    jobId: string, maxMs: number, pollMs = 10_000, stallMs = 5 * 60_000,
+  ): Promise<MapsWaitResult> {
+    const hardDeadline = Date.now() + maxMs
     let last = ''
     let sawOkButEmpty = false
     let previousBytes = -1
+    let lastGrowthAt = Date.now()
+    let peakBytes = 0
 
-    while (Date.now() < deadline) {
+    while (Date.now() < hardDeadline) {
       last = await this.status(jobId)
 
       if (last === 'failed') return { status: 'failed', bytes: 0, okButEmptyPolls: 0 }
 
-      if (last === 'ok') {
-        const body = await this.rawResults(jobId)
+      const body = last === 'ok' ? await this.rawResults(jobId) : ''
 
+      if (last === 'ok') {
         if (body.trim().length === 0) {
           // Reported complete with nothing to show for it: keep waiting.
           sawOkButEmpty = true
@@ -140,6 +164,25 @@ export class MapsSource {
         }
       }
 
+      // Growth resets the stall clock, whatever the status says. A job still
+      // `working` whose file is getting bigger is making progress.
+      if (body.length > peakBytes) {
+        peakBytes = body.length
+        lastGrowthAt = Date.now()
+      }
+
+      const stalledFor = Date.now() - lastGrowthAt
+      if (stalledFor >= stallMs) {
+        this.logger.warn('maps job stalled — no growth', {
+          jobId, stalledSeconds: Math.round(stalledFor / 1000), bytes: peakBytes, status: last,
+        })
+        return {
+          status: sawOkButEmpty ? 'ok_but_empty' : 'stalled',
+          bytes: peakBytes,
+          okButEmptyPolls: sawOkButEmpty ? 1 : 0,
+        }
+      }
+
       await new Promise(r => setTimeout(r, pollMs))
     }
 
@@ -147,7 +190,7 @@ export class MapsSource {
     // nothing" — they need different responses and the old code conflated them.
     return {
       status: sawOkButEmpty ? 'ok_but_empty' : (last ? 'timeout' : 'unknown'),
-      bytes: 0,
+      bytes: peakBytes,
       okButEmptyPolls: sawOkButEmpty ? 1 : 0,
     }
   }
@@ -175,10 +218,11 @@ export interface MapsWaitResult {
   /**
    * ok            — finished with a non-empty payload
    * failed        — the scraper reported failure
-   * ok_but_empty  — reported complete, still empty when the cap expired
-   * timeout       — never reported complete
+   * ok_but_empty  — reported complete, still empty when we gave up
+   * stalled       — stopped growing for `stallMs` without reporting complete
+   * timeout       — still growing when the hard backstop expired
    */
-  status: 'ok' | 'failed' | 'ok_but_empty' | 'timeout' | 'unknown'
+  status: 'ok' | 'failed' | 'ok_but_empty' | 'stalled' | 'timeout' | 'unknown'
   bytes: number
   okButEmptyPolls: number
   /** Carried through so a successful wait does not re-download. */

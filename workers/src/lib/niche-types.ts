@@ -34,6 +34,22 @@ interface NicheRule {
    * filter was rejecting the exact trade it was pointed at.
    */
   hints?: string[]
+  /**
+   * Whether SERP owner lookup is worth running for this niche.
+   *
+   * Measured, not assumed. Across 254 brick-and-mortar businesses SERP has
+   * produced **two** usable names: 2 on med spa, 0 on dental, 0 on vehicle
+   * wrap. Local-business search results are directory and social listings —
+   * Yelp, Instagram, RealSelf — which name nobody, and the two guards that
+   * make SERP safe (the model's source_url must be one we supplied, and the
+   * result must be tie-able to this business at this location) correctly
+   * reject nearly everything else.
+   *
+   * Online and SaaS niches are the opposite case: their founders are written
+   * about, and the same query returns Crunchbase, LinkedIn and press. Default
+   * off, on where the evidence supports it.
+   */
+  serp?: boolean
 }
 
 /**
@@ -150,6 +166,8 @@ export interface NicheFilter {
   matchedKeyword: string
   /** Free-text category words that rescue a Place-type mismatch. */
   hints: string[]
+  /** Run SERP owner lookup for this niche? */
+  serp: boolean
 }
 
 /**
@@ -186,10 +204,15 @@ export function resolveNicheFilter(niche: string): NicheFilter {
       return {
         allowed: new Set(rule.allowed), active: true, matchedKeyword: hit,
         hints: rule.hints ?? [],
+        serp: rule.serp ?? false,
       }
     }
   }
-  return { allowed: new Set(), active: false, matchedKeyword: '', hints: [] }
+  // No rule matched. Every rule in this file is a brick-and-mortar trade, so an
+  // unmatched niche is most likely the online/SaaS case — where SERP is the
+  // source that works. Defaulting it on here is what makes Phase 4's SaaS runs
+  // work without a rule per vertical.
+  return { allowed: new Set(), active: false, matchedKeyword: '', hints: [], serp: true }
 }
 
 /**

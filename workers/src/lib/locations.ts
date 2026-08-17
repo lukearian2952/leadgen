@@ -212,8 +212,42 @@ export const STATE_MAP: Record<string, string[]> = {
   'mb': ['Winnipeg', 'Brandon', 'Steinbach', 'Thompson', 'Portage la Prairie', 'Winkler', 'Selkirk', 'Morden', 'Dauphin'],
 }
 
+/**
+ * A national city list, derived from STATE_MAP rather than written out.
+ *
+ * Four cities per state across all 50 states plus DC and the territories —
+ * ~200 cities. Derived so it cannot drift from the per-state lists, and
+ * ordered state by state so a truncated run still covers the country rather
+ * than finishing California.
+ *
+ * Only the full-name state keys are used; the two-letter aliases hold the same
+ * cities and would double every entry.
+ */
+const CITIES_PER_STATE_NATIONAL = 4
+
+function buildNationalCities(): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const key of Object.keys(STATE_MAP)) {
+    if (key.length <= 2) continue          // skip 'al', 'ak', … aliases
+    for (const city of STATE_MAP[key].slice(0, CITIES_PER_STATE_NATIONAL)) {
+      if (seen.has(city)) continue
+      seen.add(city)
+      out.push(city)
+    }
+  }
+  return out
+}
+
+export const NATIONAL_CITIES = buildNationalCities()
+
 export function expandLocationStatic(location: string): string[] | null {
   const key = location.toLowerCase().trim()
+
+  // National first: "united states" would otherwise partial-match a state.
+  if (['united states', 'usa', 'us', 'nationwide', 'national', 'america'].includes(key)) {
+    return NATIONAL_CITIES
+  }
 
   // Check metro map first (exact match)
   if (LOCATION_MAP[key]) return LOCATION_MAP[key]

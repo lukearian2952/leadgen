@@ -9,7 +9,7 @@
 // rather than mysterious.
 
 import type { Task } from 'graphile-worker'
-import { wrapTask, jobKey } from './wrap.js'
+import { wrapTask, jobKey, type JobContext } from './wrap.js'
 import type { TaskDeps } from './index.js'
 import { MapsSource, parseCsv, type MapsBusiness } from '../sources/maps.js'
 import { resolveLocationScope, checkInScope } from '../lib/geo.js'
@@ -34,6 +34,17 @@ interface Payload {
    * data already sitting on disk.
    */
   existingJobId?: string
+  /**
+   * Which slice of the expanded city list this job covers.
+   *
+   * A 1,000-business national run needs ~400 queries, and gosom falls over
+   * past a few dozen at once — 48 concurrent queries produced 71 `target
+   * closed` and 8 rows. So discovery is batched: each job takes
+   * `MAPS_MAX_QUERIES` worth of cities and, when it finishes under target,
+   * enqueues the next batch. Sequential by construction, because two
+   * concurrent batches would recreate the overload this exists to avoid.
+   */
+  batchIndex?: number
   [key: string]: unknown
 }
 
@@ -79,12 +90,21 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
     // type` and a run of 403/502s, i.e. it fell over under the load rather than
     // finding nothing. Fewer, denser queries beat more, thinner ones.
     const variants = nicheQueryVariants(niche)
+    const perBatch = Math.max(1, Math.floor(maxQueries() / variants.length))
+    const batchIndex = payload.batchIndex ?? 0
+    const batchCities = cities.slice(batchIndex * perBatch, (batchIndex + 1) * perBatch)
+    const moreBatches = (batchIndex + 1) * perBatch < cities.length
+
+    if (!batchCities.length) {
+      ctx.logger.info('no cities left in this batch — discovery finished', { batchIndex })
+      ctx.cost.detail = { batchIndex, exhausted: true }
+      await finishDiscovery(ctx, db, campaignId)
+      return
+    }
+
     const queries: string[] = []
-    outer: for (const city of cities) {
-      for (const variant of variants) {
-        if (queries.length >= maxQueries()) break outer
-        queries.push(`${variant} in ${city}`)
-      }
+    for (const city of batchCities) {
+      for (const variant of variants) queries.push(`${variant} in ${city}`)
     }
     // maxSeconds is deliberately above our own wait cap: if one of the two has
     // to give up first it should be us, so the scraper's own result is never
@@ -134,7 +154,12 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
       drops[family] = (drops[family] ?? 0) + 1
     }
 
-    const seenPlace = new Set<string>()
+    // Batches overlap: neighbouring cities return the same businesses, and
+    // without this the second batch re-inserts them as fresh leads and pays to
+    // crawl and verify each one again.
+    const { rows: existingRows } = await db.query<{ place_id: string }>(
+      `select place_id from leads where campaign_id = $1 and place_id <> ''`, [campaignId])
+    const seenPlace = new Set<string>(existingRows.map(r => r.place_id))
     const seenKey = new Set<string>()
     const kept: MapsBusiness[] = []
 
@@ -241,18 +266,63 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
     }
 
     const dropped = Object.values(drops).reduce((a, b) => a + b, 0)
-    ctx.cost.detail = { returned: raw.length, kept: inserted, dropped, drops }
-    ctx.logger.info('maps discovery complete', { returned: raw.length, kept: inserted, dropped, drops })
+
+    // Campaign totals, not batch totals — step1_done accumulates across batches.
+    const { rows: [totals] } = await db.query<{ total: string }>(
+      `select count(*)::text total from leads where campaign_id = $1`, [campaignId])
+    const campaignTotal = Number(totals?.total ?? 0)
+
+    ctx.cost.detail = {
+      batchIndex, cities: batchCities.length, queries: queries.length,
+      returned: raw.length, kept: inserted, dropped, drops,
+      campaignTotal, bytes: wait.bytes,
+    }
+    ctx.logger.info('maps discovery batch complete', ctx.cost.detail)
 
     await db.query(
-      `update campaigns set step1_done = $2, stat_dropped_step1 = $3, current_step = 2 where id = $1`,
-      [campaignId, inserted, dropped])
+      `update campaigns
+          set step1_done = $2,
+              stat_dropped_step1 = coalesce(stat_dropped_step1,0) + $3,
+              current_step = 2
+        where id = $1`,
+      [campaignId, campaignTotal, dropped])
 
-    // Finalize runs once the per-lead fan-out drains. The scheduler's reconcile
-    // job is what actually detects that; this seeds it.
-    await ctx.helpers.addJob('campaign:reconcile', { campaignId },
-      { jobKey: jobKey('campaign:reconcile', campaignId), runAt: new Date(Date.now() + 60_000) })
+    // ── next batch, or finish ────────────────────────────────────────────────
+    //
+    // Sequential: the next batch is only queued once this one is written. Two
+    // concurrent 36-query scrapes would recreate exactly the overload the batch
+    // size exists to avoid.
+    if (moreBatches && campaignTotal < targetCount) {
+      await ctx.helpers.addJob('maps:discover',
+        { ...payload, batchIndex: batchIndex + 1 },
+        { jobKey: jobKey(`maps:discover:${batchIndex + 1}`, campaignId), maxAttempts: 2 })
+      ctx.logger.info('queued next discovery batch', {
+        next: batchIndex + 1, campaignTotal, targetCount,
+      })
+    } else {
+      ctx.logger.info('discovery finished', {
+        reason: campaignTotal >= targetCount ? 'target reached' : 'cities exhausted',
+        campaignTotal, targetCount,
+      })
+    }
+
+    await finishDiscovery(ctx, db, campaignId)
   })
+}
+
+/**
+ * Seed the reconcile loop.
+ *
+ * Called from every exit path, including the empty-batch one — a campaign whose
+ * discovery produced nothing still has to reach a terminal state rather than
+ * sit in `running` forever, which is the v1 failure this whole architecture
+ * exists to avoid.
+ */
+async function finishDiscovery(
+  ctx: JobContext, db: TaskDeps['db'], campaignId: string,
+): Promise<void> {
+  await ctx.helpers.addJob('campaign:reconcile', { campaignId },
+    { jobKey: jobKey('campaign:reconcile', campaignId), runAt: new Date(Date.now() + 60_000) })
 }
 
 /**

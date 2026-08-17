@@ -60,6 +60,11 @@ x-worker-base: &worker-base
     # The four extra candidate shapes measured as a straight loss on the
     # med spa benchmark. Off unless a niche justifies re-measuring.
     PATTERN_LADDER_EXTRAS: ${PATTERN_LADDER_EXTRAS:-false}
+    # Queries per discovery batch. 48 made gosom fall over; 36 did not.
+    MAPS_MAX_QUERIES: ${MAPS_MAX_QUERIES:-36}
+    # Locks older than this are presumed to belong to a killed worker.
+    # Must exceed the longest job (maps:discover, up to 45 min).
+    STALE_LOCK_MINUTES: ${STALE_LOCK_MINUTES:-60}
     # verify-svc uses host networking, so it is reached via the gateway.
     VERIFY_URL: http://host.docker.internal:8080
     VERIFY_IPS: ${VERIFY_IPS}

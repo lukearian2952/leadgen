@@ -31,6 +31,7 @@ import { adapterFor, upsertEntities, type IngestScope } from '../sources/registr
 import type { RegistryOfficer } from '../sources/registry/types.js'
 import { distinctiveTokens } from '../lib/normalise.js'
 import { longIslandCounty } from '../lib/long-island.js'
+import { resolveNicheFilter } from '../lib/niche-types.js'
 import { putCandidates, readNameState, applyNameDecision, serpWouldHelp } from './name-store.js'
 import { adjacentCounties } from '../lib/counties.js'
 import type { NameCandidate } from '../lib/name-decision.js'
@@ -503,7 +504,14 @@ async function finishStage(
 ): Promise<void> {
   const decision = await applyNameDecision(db, leadId)
 
-  if (serpWouldHelp(decision)) {
+  // SERP is per-niche now. On brick-and-mortar it produced 2 names across 254
+  // businesses while costing a Haiku call and two searches each; on unmatched
+  // (online/SaaS) niches it is the source that works.
+  const { rows: [c] } = await db.query<{ niche: string }>(
+    `select niche from campaigns where id = $1`, [campaignId])
+  const serpEnabled = resolveNicheFilter(c?.niche ?? '').serp
+
+  if (serpEnabled && serpWouldHelp(decision)) {
     await ctx.helpers.addJob('serp:owner', { campaignId, leadId },
       { jobKey: jobKey('serp:owner', campaignId, leadId), maxAttempts: 2 })
     return

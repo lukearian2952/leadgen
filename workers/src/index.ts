@@ -15,6 +15,7 @@ import { rootLogger } from './logger.js'
 import { startMetricsServer, metrics } from './metrics.js'
 import { buildTaskList, stagesForRole } from './jobs/index.js'
 import { applyMailboxFeedback, type FeedbackRequest } from './feedback.js'
+import { releaseStaleLocks } from './stale-locks.js'
 
 async function main() {
   const config = loadConfig()
@@ -37,6 +38,11 @@ async function main() {
   // mysteriously slow job pickup rather than a visible failure.
   await assertConnectionModes(config)
   logger.info('DATABASE_URL_DIRECT confirmed session-mode (LISTEN/NOTIFY available)')
+
+  // Before registering as a consumer: hand back anything a killed worker is
+  // still nominally holding. graphile's own expiry is 4 hours, which turned a
+  // restart during a scrape into a lost afternoon.
+  await releaseStaleLocks(db.app, logger)
 
   let runner: Runner | undefined
   let healthy = false
