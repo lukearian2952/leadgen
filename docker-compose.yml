@@ -116,10 +116,20 @@ services:
     mem_limit: 2g
     memswap_limit: 2g
     shm_size: 1gb
+    depends_on:
+      - decodo-proxy
     environment:
-      PROXY_SERVER: http://${DECODO_HOST}:${DECODO_PORT}
-      PROXY_USERNAME: ${DECODO_USERNAME}
-      PROXY_PASSWORD: ${DECODO_PASSWORD}
+      # Through the auth-forwarding hop, for the same reason Playwright needs it:
+      # crawl4ai drives Chromium, and Chromium does not accept credentials in a
+      # --proxy-server URL. The old direct-credential form here would have failed
+      # the same way the scraper's did.
+      #
+      # Note this container is currently INERT: no job calls crawl4ai. The crawl
+      # stage fetches directly and escalates through ProxyPool (undici), which
+      # handles proxy credentials natively — the auth problem is Chromium's
+      # alone. This is wired correctly for the day crawl4ai is used for
+      # JS-rendered pages, not a fix to today's crawl path.
+      PROXY_SERVER: http://decodo-proxy:8080
     ports:
       - "127.0.0.1:11235:11235"
     healthcheck:
