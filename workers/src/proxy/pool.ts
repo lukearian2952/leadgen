@@ -58,11 +58,38 @@ export interface ProxyResponse {
   elapsedMs: number
 }
 
+/** Thrown when a campaign has spent its residential allowance. */
+export class ResidentialBudgetExceeded extends Error {
+  constructor(readonly campaignId: string, readonly usedBytes: number, readonly budgetBytes: number) {
+    super(
+      `campaign ${campaignId} has used ${(usedBytes / 1e9).toFixed(2)} GB of its ` +
+      `${(budgetBytes / 1e9).toFixed(2)} GB residential budget`)
+    this.name = 'ResidentialBudgetExceeded'
+  }
+}
+
+/**
+ * Counts residential bytes against a campaign's budget.
+ *
+ * Injected rather than imported so ProxyPool stays free of a database
+ * dependency and remains unit-testable — its existing tests construct one with
+ * nothing but config.
+ */
+export interface BudgetTracker {
+  /** Record spend and report whether the campaign is now over. */
+  add(campaignId: string, bytes: number): Promise<{ over: boolean; used: number; budget: number }>
+  /** Cheap pre-flight check; may use a cached value. */
+  isOver(campaignId: string): boolean
+}
+
 export class ProxyPool {
   private agents = new Map<number, ProxyAgent>()
   private readonly enabled: boolean
 
-  constructor(private readonly config: Config) {
+  constructor(
+    private readonly config: Config,
+    private readonly budget?: BudgetTracker,
+  ) {
     this.enabled = Boolean(
       config.decodo.username && config.decodo.password && config.decodo.host,
     )
@@ -112,6 +139,14 @@ export class ProxyPool {
       metrics.httpRequests.inc({ pool, outcome: 'downgraded_no_credentials' })
     }
 
+    // Budget is checked before the request, not after: the point is to stop
+    // spending, and a check that only fires once the bytes are already on the
+    // wire would be a report, not a limit.
+    if (effectivePool === 'decodo_residential' && campaignId && this.budget?.isOver(campaignId)) {
+      metrics.httpRequests.inc({ pool, outcome: 'budget_exhausted' })
+      throw new ResidentialBudgetExceeded(campaignId, 0, 0)
+    }
+
     let dispatcher: Dispatcher | undefined
     let port: number | undefined
     if (effectivePool === 'decodo_residential') {
@@ -138,6 +173,12 @@ export class ProxyPool {
 
       metrics.httpRequests.inc({ pool: effectivePool, outcome: String(response.status) })
       metrics.proxyBytes.inc({ pool: effectivePool }, bytes)
+
+      // Only residential is metered — datacenter bytes are the server's own
+      // bandwidth and cost nothing per GB.
+      if (effectivePool === 'decodo_residential' && campaignId && this.budget) {
+        await this.budget.add(campaignId, bytes)
+      }
 
       return {
         response: new Response(buffer, {

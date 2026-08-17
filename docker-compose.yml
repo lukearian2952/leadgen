@@ -62,6 +62,11 @@ x-worker-base: &worker-base
     PATTERN_LADDER_EXTRAS: ${PATTERN_LADDER_EXTRAS:-false}
     # Queries per discovery batch. 48 made gosom fall over; 36 did not.
     MAPS_MAX_QUERIES: ${MAPS_MAX_QUERIES:-36}
+    # Scroll depth per query. Was 10; the filters keep ~3 per query, so most
+    # of those pages were fetched, rendered and discarded.
+    MAPS_DEPTH: ${MAPS_DEPTH:-5}
+    # gosom egresses through proxy-meter, which counts and blocks.
+    MAPS_PROXY_METER_URL: ${MAPS_PROXY_METER_URL:-http://proxy-meter:8090}
     # Locks older than this are presumed to belong to a killed worker.
     # Must exceed the longest job (maps:discover, up to 45 min).
     STALE_LOCK_MINUTES: ${STALE_LOCK_MINUTES:-60}
@@ -103,6 +108,36 @@ services:
       VERIFY_HELO_DOMAIN: ${VERIFY_HELO_DOMAIN}
       VERIFY_FROM_EMAIL: ${VERIFY_FROM_EMAIL}
       PORT: "8080"
+
+  # ── proxy-meter ─────────────────────────────────────────────────────────────
+  #
+  # Sits between gosom and Decodo. Every other egress goes through ProxyPool,
+  # which counts bytes exactly; gosom drives its own Chromium in a separate
+  # process and was therefore the one unmeasured stage — and the one with a
+  # browser in it. This counts it, blocks the hosts whose bytes we discard
+  # (tiles, photos, fonts, analytics), and refuses new connections once a
+  # budget is spent.
+  #
+  # Loopback-published like everything else; only maps-scraper talks to it.
+  proxy-meter:
+    build:
+      context: ./proxy-meter
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 256m
+    environment:
+      METER_PORT: "8090"
+      DECODO_HOST: ${DECODO_HOST}
+      DECODO_PORT: ${DECODO_PORT}
+      DECODO_USERNAME: ${DECODO_USERNAME}
+      DECODO_PASSWORD: ${DECODO_PASSWORD}
+      DECODO_COUNTRY: ${DECODO_COUNTRY:-us}
+      # Set false to measure the unoptimised baseline.
+      METER_BLOCKING: ${METER_BLOCKING:-true}
+      METER_BUDGET_BYTES: ${METER_BUDGET_BYTES:-0}
+    ports:
+      - "127.0.0.1:8090:8090"
 
   # ── SERP ────────────────────────────────────────────────────────────────────
   searxng:

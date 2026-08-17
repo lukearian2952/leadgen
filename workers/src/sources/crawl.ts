@@ -63,6 +63,9 @@ export class CrawlSource {
   constructor(
     private readonly pool: ProxyPool,
     private readonly logger: Logger,
+    /** Passed to ProxyPool so residential bytes count against the campaign's
+     *  budget. Without it the crawl spends unmetered. */
+    private readonly campaignId?: string,
   ) {}
 
   /**
@@ -86,6 +89,7 @@ export class CrawlSource {
       try {
         const res = await this.pool.fetch(url, {
           ...attempt,
+          campaignId: this.campaignId,
           timeoutMs: 20_000,
           redirect: 'follow',
           headers: {

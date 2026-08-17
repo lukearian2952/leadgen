@@ -14,6 +14,7 @@ import { wrapTask, jobKey, type JobContext } from './wrap.js'
 import type { TaskDeps } from './index.js'
 import { CrawlSource, nameAppearsInText } from '../sources/crawl.js'
 import { ProxyPool } from '../proxy/pool.js'
+import { DbBudgetTracker } from '../proxy/budget.js'
 import { askJson, peoplePrompt, PEOPLE_SCHEMA, usageCostCents, zeroUsage, addUsage } from '../lib/llm.js'
 import {
   parseName, isGenericLocalPart, isJunkDomain,
@@ -34,11 +35,12 @@ interface Payload {
 
 export function makeCrawlSiteTask(deps: TaskDeps): Task {
   const { config, db } = deps
-  const pool = new ProxyPool(config)
+  // Residential bytes on this stage count against the campaign's budget.
+  const pool = new ProxyPool(config, new DbBudgetTracker(db, deps.logger))
 
   return wrapTask<Payload>({ stage: 'crawl:site', db }, async (payload, ctx) => {
     const { campaignId, leadId, website, domain, businessName } = payload
-    const crawler = new CrawlSource(pool, ctx.logger)
+    const crawler = new CrawlSource(pool, ctx.logger, campaignId)
 
     const result = await crawler.crawl(website)
     let usage = zeroUsage()

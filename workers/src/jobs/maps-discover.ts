@@ -17,6 +17,8 @@ import { resolveNicheFilter, checkNicheTypes, nicheQueryVariants } from '../lib/
 import { extractDomain, isJunkDomain } from '../lib/identity.js'
 import { normaliseName } from '../lib/normalise.js'
 import { expandLocation } from '../lib/locations.js'
+import { recordSourceCost } from './crawl-site.js'
+import { httpFetch } from '../net.js'
 import type { Logger } from '../logger.js'
 
 interface Payload {
@@ -92,11 +94,38 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
     const variants = nicheQueryVariants(niche)
     const perBatch = Math.max(1, Math.floor(maxQueries() / variants.length))
     const batchIndex = payload.batchIndex ?? 0
-    const batchCities = cities.slice(batchIndex * perBatch, (batchIndex + 1) * perBatch)
+
+    // Cities already scraped for this campaign are never scraped again — not on
+    // a retry, not on a resumed run. Every retry before this change re-bought
+    // rows already in the database at full residential price.
+    const { rows: doneRows } = await db.query<{ city: string }>(
+      `select city from discovery_city_runs
+        where campaign_id = $1 and status = 'ok'`, [campaignId])
+    const alreadyDone = new Set(doneRows.map(r => r.city))
+
+    const slice = cities.slice(batchIndex * perBatch, (batchIndex + 1) * perBatch)
+    const batchCities = slice.filter(c => !alreadyDone.has(c))
     const moreBatches = (batchIndex + 1) * perBatch < cities.length
 
+    if (slice.length !== batchCities.length) {
+      ctx.logger.info('skipping cities already scraped for this campaign', {
+        batchIndex, skipped: slice.length - batchCities.length, remaining: batchCities.length,
+      })
+    }
+
     if (!batchCities.length) {
-      ctx.logger.info('no cities left in this batch — discovery finished', { batchIndex })
+      // Every city in this slice was already done. That is not the end of
+      // discovery — the next slice may be untouched — so advance rather than
+      // finishing, or a resumed run would stop at its first cached batch.
+      if (moreBatches) {
+        await ctx.helpers.addJob('maps:discover',
+          { ...payload, batchIndex: batchIndex + 1 },
+          { jobKey: jobKey(`maps:discover:${batchIndex + 1}`, campaignId), maxAttempts: 2 })
+        ctx.cost.detail = { batchIndex, allCached: true, advancedTo: batchIndex + 1 }
+        ctx.logger.info('batch fully cached — advancing', { batchIndex })
+        return
+      }
+      ctx.logger.info('no cities left — discovery finished', { batchIndex })
       ctx.cost.detail = { batchIndex, exhausted: true }
       await finishDiscovery(ctx, db, campaignId)
       return
@@ -111,11 +140,16 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
     // discarded half-written.
     const jobId = existingJobId ?? await source.startJob(
       `${campaignId.slice(0, 8)}-maps`, queries, proxies,
-      { depth: 10, maxSeconds: Math.round(mapsWaitMs(queries.length) / 1000) + 300 },
+      { depth: mapsDepth(), maxSeconds: Math.round(mapsWaitMs(queries.length) / 1000) + 300 },
     )
     if (existingJobId) {
       ctx.logger.info('adopting an already-completed scraper job', { jobId })
     }
+
+    // Zero the meter so the bytes we read back belong to this batch alone.
+    // Only when we actually started a scrape — adopting a finished job spends
+    // nothing and must not clear another batch's reading.
+    if (!existingJobId) await resetMeter(ctx.logger)
 
     // ── how long to wait ──────────────────────────────────────────────────────
     //
@@ -267,6 +301,34 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
 
     const dropped = Object.values(drops).reduce((a, b) => a + b, 0)
 
+    // ── residential bytes ─────────────────────────────────────────────────────
+    //
+    // The one stage that could not report its own proxy usage now can. Read
+    // before anything else touches the meter, and attributed through the same
+    // add_source_cost path every other stage uses so "MB per business" is one
+    // query rather than a special case.
+    const meter = existingJobId ? null : await readMeter(ctx.logger)
+    if (meter) {
+      await recordSourceCost(db, campaignId, 'google_maps', 'maps',
+        inserted, { decodo_residential: meter.totalBytes }, 0, 0, 0)
+      await db.query(`select add_residential_bytes($1, $2)`,
+        [campaignId, meter.totalBytes])
+    }
+
+    // Cities are recorded whatever the yield: an `empty` city is still a city
+    // we have paid to ask about, and re-asking would cost the same again.
+    for (const city of batchCities) {
+      await db.query(
+        `insert into discovery_city_runs
+           (campaign_id, city, queries, status, rows_returned, kept, batch_index)
+         values ($1,$2,$3,$4,$5,$6,$7)
+         on conflict (campaign_id, city) do update
+           set status = excluded.status, rows_returned = excluded.rows_returned,
+               kept = excluded.kept, ran_at = now()`,
+        [campaignId, city, variants.map(v => `${v} in ${city}`),
+         raw.length ? 'ok' : 'empty', raw.length, inserted, batchIndex])
+    }
+
     // Campaign totals, not batch totals — step1_done accumulates across batches.
     const { rows: [totals] } = await db.query<{ total: string }>(
       `select count(*)::text total from leads where campaign_id = $1`, [campaignId])
@@ -276,6 +338,12 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
       batchIndex, cities: batchCities.length, queries: queries.length,
       returned: raw.length, kept: inserted, dropped, drops,
       campaignTotal, bytes: wait.bytes,
+      depth: mapsDepth(),
+      residential_mb: meter ? Number((meter.totalBytes / 1e6).toFixed(3)) : null,
+      mb_per_business: meter && inserted
+        ? Number((meter.totalBytes / 1e6 / inserted).toFixed(3)) : null,
+      meter_blocked: meter?.blocked ?? null,
+      meter_top_hosts: meter?.topHosts?.slice(0, 5) ?? null,
     }
     ctx.logger.info('maps discovery batch complete', ctx.cost.detail)
 
@@ -374,6 +442,17 @@ export function mapsWaitMs(
  * than to no proxy at all.
  */
 function residentialProxyUrls(config: TaskDeps['config']): string[] {
+  // proxy-meter first. It attaches the real Decodo credentials upstream, so
+  // the URL handed to gosom carries placeholder ones — gosom's internal
+  // AuthProxy *requires* a user:pass in the URL and refuses to start without,
+  // which is what broke the earlier credential-free forwarder.
+  const meter = (process.env.MAPS_PROXY_METER_URL ?? '').trim()
+  if (meter) {
+    const u = new URL(meter)
+    if (!u.username) { u.username = 'meter'; u.password = 'meter' }
+    return [u.toString().replace(/\/$/, '')]
+  }
+
   const forwarder = (process.env.MAPS_PROXY_URL ?? '').trim()
   if (forwarder) return [forwarder]
 
@@ -448,5 +527,57 @@ async function fetchThroughProxy(
     return await res.json() as Record<string, string>
   } finally {
     await agent.close().catch(() => {})
+  }
+}
+
+/**
+ * Scroll depth per query.
+ *
+ * Was 10 — ten pages of scrolling per city. The filters keep roughly three
+ * businesses per query, so most of those pages were fetched, rendered and
+ * discarded. Residential bytes scale with depth almost linearly, so this is
+ * the largest single lever on cost after blocking.
+ */
+export function mapsDepth(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.MAPS_DEPTH ?? '')
+  return Number.isFinite(n) && n > 0 ? n : 5
+}
+
+interface MeterReading {
+  totalBytes: number
+  blocked: number
+  topHosts: Array<{ host: string; mb: number; n: number }>
+}
+
+function meterBase(): string {
+  return (process.env.MAPS_PROXY_METER_URL ?? '').trim().replace(/\/$/, '')
+}
+
+/** Zero the meter so a batch's reading belongs to that batch alone. */
+async function resetMeter(logger: Pick<Logger, 'warn'>): Promise<void> {
+  const base = meterBase()
+  if (!base) return
+  try {
+    await httpFetch(new URL('/meter/reset', base), {
+      method: 'POST', signal: AbortSignal.timeout(10_000),
+    })
+  } catch (err) {
+    // Losing the measurement must not lose the scrape.
+    logger.warn('could not reset proxy meter', { err: (err as Error).message })
+  }
+}
+
+async function readMeter(logger: Pick<Logger, 'warn'>): Promise<MeterReading | null> {
+  const base = meterBase()
+  if (!base) return null
+  try {
+    const res = await httpFetch(new URL('/metrics', base), {
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!res.ok) return null
+    return await res.json() as MeterReading
+  } catch (err) {
+    logger.warn('could not read proxy meter', { err: (err as Error).message })
+    return null
   }
 }
