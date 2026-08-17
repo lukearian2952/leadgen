@@ -132,6 +132,7 @@ export class MapsSource {
    */
   async waitFor(
     jobId: string, maxMs: number, pollMs = 10_000, stallMs = 5 * 60_000,
+    startupGraceMs = 15 * 60_000,
   ): Promise<MapsWaitResult> {
     const hardDeadline = Date.now() + maxMs
     let last = ''
@@ -145,7 +146,16 @@ export class MapsSource {
 
       if (last === 'failed') return { status: 'failed', bytes: 0, okButEmptyPolls: 0 }
 
-      const body = last === 'ok' ? await this.rawResults(jobId) : ''
+      // Downloaded on every poll, not only when the status says `ok`.
+      //
+      // "Wait while the file is still growing" is only implementable if we
+      // actually look at the file. gosom reports `working` for the whole
+      // scrape, so reading it only on `ok` meant growth was never observed and
+      // every long job looked stalled from the first poll. A partial download
+      // during `working` is not usable as *results* — that is what the
+      // stability check below is for — but its size is exactly the progress
+      // signal this needs.
+      const body = await this.rawResults(jobId)
 
       if (last === 'ok') {
         if (body.trim().length === 0) {
@@ -171,10 +181,18 @@ export class MapsSource {
         lastGrowthAt = Date.now()
       }
 
-      const stalledFor = Date.now() - lastGrowthAt
-      if (stalledFor >= stallMs) {
-        this.logger.warn('maps job stalled — no growth', {
-          jobId, stalledSeconds: Math.round(stalledFor / 1000), bytes: peakBytes, status: last,
+      // Before the first byte, "no growth" is the normal state: gosom queues
+      // every query, drives a browser through them, and writes nothing until it
+      // has results. Applying the stall rule from t=0 killed a healthy national
+      // batch after five minutes of ordinary warm-up. So an empty file gets a
+      // longer, separate grace period, and the stall rule only governs a job
+      // that has started producing and then stopped.
+      const idleFor = Date.now() - lastGrowthAt
+      const limit = peakBytes === 0 ? startupGraceMs : stallMs
+      if (idleFor >= limit) {
+        this.logger.warn('maps job stalled', {
+          jobId, idleSeconds: Math.round(idleFor / 1000), bytes: peakBytes, status: last,
+          phase: peakBytes === 0 ? 'never produced output' : 'stopped growing',
         })
         return {
           status: sawOkButEmpty ? 'ok_but_empty' : 'stalled',

@@ -102,3 +102,46 @@ describe('mapsWaitMs — the cap that dead-lettered a good scrape', () => {
     expect(mapsWaitMs(30, { MAPS_WAIT_MINUTES: '0' })).toBe(20 * 60_000)
   })
 })
+
+describe('stall detection needs a startup grace', () => {
+  // The first national batch was killed after five minutes of ordinary
+  // warm-up: gosom queues every query and drives a browser through them before
+  // writing anything, so "no growth" from t=0 is the normal state, not a stall.
+  it('does not call an empty-but-young job stalled', async () => {
+    let polls = 0
+    const src = new MapsSource('http://scraper', silentLogger())
+    ;(src as any).status = async () => 'working'
+    ;(src as any).rawResults = async () => { polls++; return '' }
+
+    // stallMs 50ms, startup grace 400ms: an empty job must survive past stallMs.
+    const out = await src.waitFor('j', 300, 10, 50, 400)
+    expect(out.status).toBe('timeout')      // hit the hard backstop, not stalled
+    expect(polls).toBeGreaterThan(3)
+  })
+
+  it('does call an empty job stalled once the grace expires', async () => {
+    const src = new MapsSource('http://scraper', silentLogger())
+    ;(src as any).status = async () => 'working'
+    ;(src as any).rawResults = async () => ''
+
+    const out = await src.waitFor('j', 5_000, 10, 50, 100)
+    expect(out.status).toBe('stalled')
+  })
+
+  it('applies the shorter stall rule once output has started', async () => {
+    let n = 0
+    const src = new MapsSource('http://scraper', silentLogger())
+    ;(src as any).status = async () => 'working'
+    // Grows once, then freezes.
+    ;(src as any).rawResults = async () => (++n <= 2 ? 'row\n' : 'row\n')
+
+    const out = await src.waitFor('j', 5_000, 10, 100, 10_000)
+    expect(out.status).toBe('stalled')
+    expect(out.bytes).toBeGreaterThan(0)
+  })
+})
+
+function silentLogger() {
+  const noop = () => {}
+  return { info: noop, warn: noop, error: noop, debug: noop, child: () => silentLogger() } as any
+}
