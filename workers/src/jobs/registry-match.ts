@@ -119,7 +119,8 @@ export function makeRegistryMatchTask(deps: TaskDeps): Task {
       // No forward match is precisely where the reverse direction earns its
       // keep: the business name is unmatchable (DBA, trade name, wrong county)
       // but the owner's own name may still be on a filing nearby.
-      const reverse = await reverseLookup(db, leadId, state, county, [])
+      const reverse = await reverseLookup(
+        db, leadId, state, county, [], config.registryReverseStatewide)
       await putCandidates(db, leadId, 'registry', reverse.candidates)
       if (reverse.address) await saveAddress(db, leadId, reverse.address)
 
@@ -128,6 +129,10 @@ export function makeRegistryMatchTask(deps: TaskDeps): Task {
         topped_up: toppedUp, reason: 'no_entity_above_threshold',
         reverse_checked: reverse.checked,
         reverse_hits: reverse.candidates.length,
+        reverse_county_hits: reverse.countyHits,
+        reverse_statewide_hits: reverse.statewideHits,
+        reverse_statewide_queries: reverse.statewideQueries,
+        reverse_statewide_ambiguous: reverse.statewideAmbiguous,
       }
       return finishStage(ctx, db, campaignId, leadId)
     }
@@ -158,7 +163,8 @@ export function makeRegistryMatchTask(deps: TaskDeps): Task {
       },
     }] : []
 
-    const reverse = await reverseLookup(db, leadId, state, county, candidates)
+    const reverse = await reverseLookup(
+      db, leadId, state, county, candidates, config.registryReverseStatewide)
     await putCandidates(db, leadId, 'registry', [...candidates, ...reverse.candidates])
 
     await db.query(
@@ -176,6 +182,10 @@ export function makeRegistryMatchTask(deps: TaskDeps): Task {
       source_field: officer?.source_field ?? null,
       reverse_checked: reverse.checked,
       reverse_hits: reverse.candidates.length,
+      reverse_county_hits: reverse.countyHits,
+      reverse_statewide_hits: reverse.statewideHits,
+      reverse_statewide_queries: reverse.statewideQueries,
+      reverse_statewide_ambiguous: reverse.statewideAmbiguous,
     }
 
     return finishStage(ctx, db, campaignId, leadId)
@@ -187,6 +197,14 @@ interface ReverseResult {
   checked: number
   candidates: NameCandidate[]
   address: { street: string; city: string; zip: string } | null
+  /** Hits from the county-scoped search. */
+  countyHits: number
+  /** Extra hits the statewide fallback found that the county scope missed. */
+  statewideHits: number
+  /** Statewide queries actually issued, for the cost split. */
+  statewideQueries: number
+  /** Statewide candidates rejected as too common a name to be evidence. */
+  statewideAmbiguous: number
 }
 
 /**
@@ -214,11 +232,25 @@ interface ReverseResult {
  * The entity's address is captured too: a registered address is a real postal
  * address for the business, which the Maps listing does not always give.
  */
+/**
+ * How many entities statewide may share an officer name before the match stops
+ * being evidence.
+ *
+ * The county scope is what keeps a full-name match meaningful. Dropping it
+ * trades precision for recall, and "John Smith is an officer of one of the 40
+ * entities called that in New York" identifies nobody. One or two entities is a
+ * person; more than that is a common name.
+ */
+const STATEWIDE_MAX_ENTITIES = 2
+
 async function reverseLookup(
   db: TaskDeps['db'], leadId: string, state: string, county: string,
-  forward: readonly NameCandidate[],
+  forward: readonly NameCandidate[], statewideFallback = false,
 ): Promise<ReverseResult> {
-  const empty: ReverseResult = { checked: 0, candidates: [], address: null }
+  const empty: ReverseResult = {
+    checked: 0, candidates: [], address: null,
+    countyHits: 0, statewideHits: 0, statewideQueries: 0, statewideAmbiguous: 0,
+  }
   if (!state) return empty
 
   const { candidates: existing } = await readNameState(db, leadId)
@@ -228,27 +260,60 @@ async function reverseLookup(
   const counties = adjacentCounties(state, county)
   const out: NameCandidate[] = []
   let address: ReverseResult['address'] = null
+  let countyHits = 0, statewideHits = 0, statewideQueries = 0, statewideAmbiguous = 0
+
+  type Row = {
+    id: string; name: string; county: string
+    street: string; city: string; postal_code: string
+    officers: Array<{ first: string; last: string; title: string; source_field: string }>
+  }
 
   for (const person of people) {
     // Already corroborated by the forward match; a second lookup adds nothing.
     if (forward.some(f => f.first === person.first && f.last === person.last)) continue
 
-    const { rows } = await db.query<{
-      id: string; name: string; county: string
-      street: string; city: string; postal_code: string
-      officers: Array<{ first: string; last: string; title: string; source_field: string }>
-    }>(
+    const officerJson = JSON.stringify([{ first: person.first, last: person.last }])
+    const countyRows = (await db.query<Row>(
       `select id, name, county, street, city, postal_code, officers
          from registry_entities
         where state = $1
           and ($2::text[] = '{}' or county = any($2))
           and officers @> $3::jsonb
         limit 3`,
-      [state, counties, JSON.stringify([{ first: person.first, last: person.last }])])
+      [state, counties, officerJson])).rows
+
+    let rows = countyRows
+    let viaStatewide = false
+
+    // ── statewide fallback ────────────────────────────────────────────────────
+    //
+    // Only when the county scope missed, because it is strictly wider and would
+    // otherwise mask the county result. Bounded by STATEWIDE_MAX_ENTITIES: a
+    // name held by three or more entities across the state is a common name,
+    // not an identification, and admitting it would attach a real person to the
+    // wrong business — the exact failure the Phase 3 trigram guard exists to
+    // prevent, in a different disguise.
+    if (!rows.length && statewideFallback) {
+      statewideQueries++
+      const wide = (await db.query<Row>(
+        `select id, name, county, street, city, postal_code, officers
+           from registry_entities
+          where state = $1 and officers @> $2::jsonb
+          limit $3`,
+        [state, officerJson, STATEWIDE_MAX_ENTITIES + 1])).rows
+
+      if (wide.length && wide.length <= STATEWIDE_MAX_ENTITIES) {
+        rows = wide
+        viaStatewide = true
+      } else if (wide.length) {
+        statewideAmbiguous++
+      }
+    }
 
     if (!rows.length) continue
     const hit = rows[0]
     const officer = hit.officers.find(o => o.first === person.first && o.last === person.last)
+    if (viaStatewide) statewideHits++; else countyHits++
 
     out.push({
       source: 'registry',
@@ -256,7 +321,7 @@ async function reverseLookup(
       last: person.last,
       title: officer?.title ?? 'Officer',
       nameClass: 'owner_grade',
-      confidence: 1,
+      confidence: viaStatewide ? 0.8 : 1,
       detail: {
         reverse: true,
         registry_state: state,
@@ -264,7 +329,8 @@ async function reverseLookup(
         entity_id: hit.id,
         entity_county: hit.county,
         source_field: officer?.source_field ?? null,
-        counties_searched: counties,
+        counties_searched: viaStatewide ? 'statewide' : counties,
+        scope: viaStatewide ? 'statewide' : 'county',
         other_entities: rows.length - 1,
       },
     })
@@ -274,7 +340,10 @@ async function reverseLookup(
     }
   }
 
-  return { checked: people.length, candidates: out, address }
+  return {
+    checked: people.length, candidates: out, address,
+    countyHits, statewideHits, statewideQueries, statewideAmbiguous,
+  }
 }
 
 async function saveAddress(

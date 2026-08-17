@@ -130,16 +130,37 @@ describe('the four extra patterns', () => {
 })
 
 describe('candidateLadder', () => {
-  it('puts the learned pattern first, then six, then the extras', () => {
-    const out = candidateLadder('Jane', 'Smith', 'x.com', 'f_last')
+  it('is the standard six by default — the extras were a measured loss', () => {
+    // Measured on the 75-business benchmark: the extras recovered zero
+    // mailboxes while taking Verifalia checks from 79 to 205.
+    const out = candidateLadder('Jane', 'Smith', 'x.com')
+    expect(out).toHaveLength(7)   // the six shapes plus `last@`
+    expect(out).not.toContain('janesmith@x.com')
+    expect(out).not.toContain('smithjane@x.com')
+  })
+
+  it('appends the extras when explicitly enabled', () => {
+    const out = candidateLadder('Jane', 'Smith', 'x.com', 'f_last', true)
     expect(out[0]).toBe('j_smith@x.com')
     expect(out).toHaveLength(11)
-    // The standard six come before the remaining extras.
+    // The standard six still come before the extras.
     expect(out.indexOf('jane.smith@x.com')).toBeLessThan(out.indexOf('janesmith@x.com'))
   })
 
+  it('still honours a learned pattern with the extras off', () => {
+    const out = candidateLadder('Jane', 'Smith', 'x.com', 'flast')
+    expect(out[0]).toBe('jsmith@x.com')
+  })
+
+  it('puts a learned EXTRA pattern first even when extras are off', () => {
+    // The flag governs guessing, not knowledge: a domain demonstrably using
+    // `firstlast` must still be addressed that way.
+    const out = candidateLadder('Jane', 'Smith', 'x.com', 'firstlast')
+    expect(out[0]).toBe('janesmith@x.com')
+  })
+
   it('does not duplicate the learned pattern lower down', () => {
-    const out = candidateLadder('Jane', 'Smith', 'x.com', 'first.last')
+    const out = candidateLadder('Jane', 'Smith', 'x.com', 'first.last', true)
     expect(out.filter(e => e === 'jane.smith@x.com')).toHaveLength(1)
   })
 

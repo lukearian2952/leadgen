@@ -212,12 +212,12 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
     const siteEmail = existing[0]?.email ?? ''
 
     // Learned pattern first, then the standard six, then the four extras. The
-    // extras exist because 6 of Phase 3's 30 named leads ended
-    // `mailbox_invalid` — every candidate rejected — which means the real
-    // shape was outside the six. Verification still stops at the first `safe`,
-    // so a longer ladder costs nothing on a domain that converts early.
+    // extras are **off by default**: measured on the benchmark they recovered
+    // zero mailboxes for 2.6x the verification spend, so the ladder is the
+    // standard six unless PATTERN_LADDER_EXTRAS says otherwise.
     const generated = candidateLadder(
-      lead.owner_first_name, lead.owner_last_name, domain, known?.pattern)
+      lead.owner_first_name, lead.owner_last_name, domain, known?.pattern,
+      config.patternLadderExtras)
 
     const toCheck = [...new Set([siteEmail, ...generated].filter(Boolean))]
       .filter(e => !isGenericLocalPart(e))

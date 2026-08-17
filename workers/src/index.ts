@@ -14,6 +14,7 @@ import { createDb, assertConnectionModes, SESSION_CONNS_PER_WORKER, type Db } fr
 import { rootLogger } from './logger.js'
 import { startMetricsServer, metrics } from './metrics.js'
 import { buildTaskList, stagesForRole } from './jobs/index.js'
+import { applyMailboxFeedback, type FeedbackRequest } from './feedback.js'
 
 async function main() {
   const config = loadConfig()
@@ -40,14 +41,25 @@ async function main() {
   let runner: Runner | undefined
   let healthy = false
 
+  // The closed-loop feedback endpoint is owned by the verify role — it is the
+  // one that already reasons about mailbox verdicts, and registering it on
+  // every worker would give the same URL seven different ports.
+  const postRoutes = config.role === 'verify' || config.role === 'all'
+    ? [{
+        path: '/feedback/mailbox',
+        handle: async (body: unknown) => applyMailboxFeedback(db.app, body as FeedbackRequest),
+      }]
+    : []
+
   const metricsServer = startMetricsServer(config.metricsPort, () => ({
     healthy,
     detail: {
       role: config.role,
       stages: stagesForRole(config.role),
       concurrency: config.concurrency,
+      postRoutes: postRoutes.map(r => r.path),
     },
-  }))
+  }), postRoutes)
   logger.info('metrics and health listening', { port: config.metricsPort })
 
   runner = await run({

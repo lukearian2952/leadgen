@@ -110,6 +110,17 @@ const NICHE_RULES: NicheRule[] = [
     allowed: ['general_contractor', 'electrician', 'plumber', 'painter', 'roofing_contractor'],
   },
   {
+    // Before the broad 'auto' rule, which would otherwise swallow it and admit
+    // every mechanic and tyre shop. gosom labels these "Vehicle wrapping
+    // service", "Car detailing service" or "Sign shop" — none of which is a
+    // Google Place type, so the keyword fallback in maps:discover is what
+    // actually does the work here. The rule still narrows the type side.
+    keywords: ['vehicle wrap', 'car wrap', 'wrap shop', 'vinyl wrap',
+               'paint protection', 'ppf', 'vehicle graphic'],
+    allowed: ['car_repair', 'painter', 'car_wash', 'auto_parts_store',
+              'general_contractor', 'car_dealer'],
+  },
+  {
     keywords: ['auto', 'car repair', 'mechanic', 'body shop', 'tire'],
     allowed: ['car_repair', 'car_dealer', 'car_wash'],
   },

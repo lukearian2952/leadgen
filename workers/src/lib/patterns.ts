@@ -20,7 +20,19 @@ export const PATTERN_ORDER: PatternName[] = [
   'first.last', 'first', 'flast', 'firstl', 'f.last', 'first_last', 'last',
 ]
 
-/** The Phase 4 extras, appended after PATTERN_ORDER when guessing. */
+/**
+ * The Phase 4 extras. **Off by default** — set `PATTERN_LADDER_EXTRAS=true`.
+ *
+ * Measured on the 75-business benchmark and reverted: they recovered **zero**
+ * mailboxes while taking average candidates per lead from 4.06 to 10.78,
+ * Verifalia checks from 79 to 205, and enrichment spend from 23.7¢ to 61.5¢.
+ * `mailbox_invalid` did not improve among leads named in both runs.
+ *
+ * Kept behind the flag rather than deleted because the negative result is
+ * niche-specific: it says med spa owners do not use these shapes, not that
+ * nobody does. A niche whose businesses run real corporate mail may well
+ * justify turning it on — and then the measurement is one env var away.
+ */
 export const EXTRA_PATTERN_ORDER: PatternName[] = [
   'firstlast', 'lastfirst', 'first_l', 'f_last',
 ]
@@ -131,6 +143,7 @@ export function candidatesFor(
 export function candidateLadder(
   first: string, last: string, domain: string,
   knownPattern?: PatternName | null,
+  includeExtras = false,
 ): string[] {
   if (!first || !domain) return []
 
@@ -142,7 +155,7 @@ export function candidateLadder(
 
   if (knownPattern) push(knownPattern)
   for (const pattern of PATTERN_ORDER) push(pattern)
-  for (const pattern of EXTRA_PATTERN_ORDER) push(pattern)
+  if (includeExtras) for (const pattern of EXTRA_PATTERN_ORDER) push(pattern)
   return out
 }
 

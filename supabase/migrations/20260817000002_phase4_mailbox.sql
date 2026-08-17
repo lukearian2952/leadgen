@@ -44,3 +44,30 @@ alter table public.leads
 
 comment on column public.leads.address_source is
   'Where the mailing address came from: google_maps | registry_reverse | registry_match';
+
+-- ── mailbox_feedback: the closed loop ────────────────────────────────────────
+--
+-- Ground truth from an actual send, as opposed to a verifier's prediction. The
+-- unique key on (email, outcome) is the idempotency guarantee: senders retry
+-- webhooks, and the same bounce applied twice must not count twice or
+-- re-promote a pattern that a later hard bounce retracted.
+--
+-- Not (email) alone, deliberately — an address can legitimately soft-bounce on
+-- Monday and deliver on Tuesday, and both facts are worth keeping.
+
+create table if not exists public.mailbox_feedback (
+  id         uuid primary key default gen_random_uuid(),
+  email      text not null,
+  outcome    text not null check (outcome in ('delivered','hard_bounce','soft_bounce')),
+  source     text not null default '',
+  domain     text not null default '',
+  created_at timestamptz not null default now()
+);
+
+create unique index if not exists mailbox_feedback_uniq
+  on public.mailbox_feedback (email, outcome);
+create index if not exists mailbox_feedback_domain
+  on public.mailbox_feedback (domain);
+
+alter table public.mailbox_feedback enable row level security;
+-- Service-role only: written by the sender webhook, read by the pattern logic.

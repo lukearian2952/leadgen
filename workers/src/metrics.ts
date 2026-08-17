@@ -136,8 +136,29 @@ export interface HealthState {
  * One tiny HTTP server per worker exposing /healthz and /metrics. Docker's
  * healthcheck and Prometheus both hit this; nothing else is served.
  */
-export function startMetricsServer(port: number, getHealth: () => HealthState): Server {
+/**
+ * Optional POST route, registered only by the worker role that owns it.
+ *
+ * The feedback endpoint lives here rather than in its own service because this
+ * server already exists on every worker, is already bound to 127.0.0.1 by
+ * docker-compose, and is therefore already covered by the security posture in
+ * HANDOFF §2 — every LeadGen port is loopback-only except the firewalled
+ * verify-svc. A new public listener would need its own iptables rule and would
+ * be one more thing to get wrong.
+ */
+export interface PostRoute {
+  path: string
+  handle: (body: unknown) => Promise<{ status: number; body: unknown }>
+}
+
+export function startMetricsServer(
+  port: number, getHealth: () => HealthState, postRoutes: PostRoute[] = [],
+): Server {
   const server = createServer((req, res) => {
+    if (req.method === 'POST') {
+      const route = postRoutes.find(r => r.path === req.url)
+      if (route) { handlePost(req, res, route); return }
+    }
     if (req.url === '/metrics') {
       res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' })
       res.end(renderMetrics())
@@ -154,4 +175,50 @@ export function startMetricsServer(port: number, getHealth: () => HealthState): 
   })
   server.listen(port)
   return server
+}
+
+/** 64 KB is far more than any webhook needs and stops a bad caller eating RAM. */
+const MAX_BODY_BYTES = 64 * 1024
+
+function handlePost(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  route: PostRoute,
+): void {
+  const chunks: Buffer[] = []
+  let size = 0
+  let aborted = false
+
+  const fail = (status: number, error: string) => {
+    aborted = true
+    res.writeHead(status, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ok: false, error }))
+  }
+
+  req.on('data', chunk => {
+    if (aborted) return
+    size += chunk.length
+    if (size > MAX_BODY_BYTES) { req.destroy(); return fail(413, 'body too large') }
+    chunks.push(chunk as Buffer)
+  })
+
+  req.on('end', () => {
+    if (aborted) return
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')
+    } catch {
+      return fail(400, 'body is not valid JSON')
+    }
+    route.handle(parsed)
+      .then(result => {
+        res.writeHead(result.status, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(result.body))
+      })
+      .catch((err: Error) => {
+        // 500, not 400: the caller's retry is the right response to our fault.
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: err.message }))
+      })
+  })
 }

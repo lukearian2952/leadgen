@@ -65,6 +65,12 @@ const SPECS: VarSpec[] = [
   // Registry
   { name: 'SOCRATA_APP_TOKEN', requiredFor: [],
     degrades: 'Socrata requests are throttled harder (shared anonymous pool)' },
+  { name: 'REGISTRY_REVERSE_STATEWIDE', requiredFor: [],
+    degrades: 'reverse officer lookup stays county-scoped (no statewide fallback)' },
+
+  // Mailbox construction
+  { name: 'PATTERN_LADDER_EXTRAS', requiredFor: [],
+    degrades: 'candidate ladder is the standard six shapes (measured best on med spa)' },
 
   // Verification
   { name: 'VERIFY_URL',           requiredFor: ['verify'] },
@@ -136,6 +142,10 @@ export interface Config {
   mapsScraperUrl: string
   googlePlacesApiKey: string
   socrataAppToken: string
+  /** Fall back to a statewide officer search when the county scope misses. */
+  registryReverseStatewide: boolean
+  /** Append the four Phase 4 extra shapes to the candidate ladder. */
+  patternLadderExtras: boolean
   verify: {
     url: string
     ips: string[]
@@ -235,6 +245,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     mapsScraperUrl:     env.GOOGLE_MAPS_SCRAPER_URL ?? '',
     googlePlacesApiKey: env.GOOGLE_PLACES_API_KEY ?? '',
     socrataAppToken:    env.SOCRATA_APP_TOKEN ?? '',
+    registryReverseStatewide:
+      (env.REGISTRY_REVERSE_STATEWIDE ?? '').trim().toLowerCase() === 'true',
+    // Default off: measured on the 75-business benchmark as zero recovery for
+    // 2.6x the verification spend. See EXTRA_PATTERN_ORDER in lib/patterns.ts.
+    patternLadderExtras:
+      (env.PATTERN_LADDER_EXTRAS ?? '').trim().toLowerCase() === 'true',
     verify: {
       url:        env.VERIFY_URL ?? '',
       ips,
