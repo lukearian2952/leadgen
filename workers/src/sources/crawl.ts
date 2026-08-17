@@ -200,15 +200,38 @@ const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g
 /** Asset filenames match the email shape; excluding them is not optional. */
 const NOT_EMAIL_RE = /\.(png|jpe?g|gif|svg|webp|css|js|woff2?|ttf|ico|mp4|pdf)$/i
 
+/**
+ * Percent-decode and strip whitespace from a scraped address.
+ *
+ * Both scrape passes use this so an address written one way in `mailto:` and
+ * another in the surrounding text collapses to a single entry. Malformed
+ * escapes are left as-is rather than thrown — a bad href must not kill a crawl.
+ */
+function normaliseScrapedEmail(raw: string): string {
+  let decoded: string
+  try { decoded = decodeURIComponent(raw) } catch { decoded = raw }
+  return decoded.replace(/\s+/g, '').toLowerCase()
+}
+
 export function extractEmails(html: string, preferHost?: string): string[] {
   const found = new Set<string>()
 
   for (const m of html.matchAll(/mailto:([^"'>?\s]+)/gi)) {
-    const e = decodeURIComponent(m[1]).trim().toLowerCase()
+    // `decodeURIComponent` turns `%20` into a real space, which `.trim()` then
+    // only removes from the ends — `mailto:%20info@x.com` came through as
+    // " info@x.com" and was stored with the space intact. That address then
+    // reads as a *personal* local part rather than the role inbox it is, which
+    // matters now that the on-domain-personal count is a reported metric.
+    // decodeURIComponent can also throw on a malformed escape.
+    const e = normaliseScrapedEmail(m[1])
     if (e.includes('@') && !NOT_EMAIL_RE.test(e)) found.add(e)
   }
   for (const m of html.matchAll(EMAIL_RE)) {
-    const e = m[0].trim().toLowerCase()
+    // EMAIL_RE allows `%` in a local part, so the *encoded* form of an address
+    // already captured above matches here too — `mailto:%20info@x.com` yielded
+    // both `info@x.com` and `info%20@x.com`. Normalising identically lets the
+    // Set collapse them instead of reporting one address as two.
+    const e = normaliseScrapedEmail(m[0])
     if (!NOT_EMAIL_RE.test(e)) found.add(e)
   }
 

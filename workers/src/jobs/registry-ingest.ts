@@ -99,6 +99,15 @@ export function nicheNameTokens(niche: string): string[] {
   if (/plumb/.test(n))       return ['PLUMB', 'ROOTER', 'DRAIN', 'SEWER']
   if (/law|attorney/.test(n))return ['LAW', 'LEGAL', 'ATTORNEY', 'COUNSEL']
   if (/salon|hair/.test(n))  return ['SALON', 'HAIR', 'BEAUTY', 'STUDIO', 'BARBER']
+  // Deliberately narrow. The generic fallback below would yield VEHICLE, WRAP
+  // and SHOP — and "SHOP" statewide matches every barbershop, coffee shop and
+  // print shop in New York, which is a slow query returning almost nothing
+  // useful. WRAP and the sign/graphics trade words are what these businesses
+  // actually register under.
+  if (/wrap|vinyl|tint|graphic|decal|ppf|paint protection/.test(n)) {
+    return ['WRAP', 'VINYL', 'GRAPHIC', 'SIGN', 'TINT', 'DECAL', 'CUSTOM AUTO',
+            'AUTO SPA', 'DETAIL']
+  }
   // A single broad token beats no filter at all, which for NY is 4.27M rows.
   const words = n.split(/\s+/).filter(w => w.length >= 4)
   return words.length ? words.map(w => w.toUpperCase()) : ['LLC']

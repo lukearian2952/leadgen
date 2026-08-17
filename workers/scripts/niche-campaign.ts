@@ -54,10 +54,38 @@ async function create(niche: string, location: string, target: number): Promise<
   console.log(`created ${c.id}  "${niche}" / "${location}" target=${target}  label=${label}`)
 }
 
+/**
+ * Counties the campaign's own discovered businesses actually landed in.
+ *
+ * For a statewide campaign ("vehicle wrap shop" / "New York") a blind ingest
+ * would pull every matching entity in all 62 NY counties, which is slow and
+ * mostly irrelevant — the businesses cluster in a handful. Deriving the scope
+ * from discovery output keeps the slice proportional to the campaign.
+ *
+ * Falls back to whatever the caller passed when discovery has produced no
+ * county yet.
+ */
+async function countiesFromLeads(campaignId: string, state: string): Promise<string[]> {
+  const { rows } = await db.query<{ county: string }>(
+    `select distinct coalesce(nullif(l.county,''), county_for_zip(b.postal_code, $2)) county
+       from leads l left join businesses b on b.id = l.business_id
+      where l.campaign_id = $1
+        and coalesce(nullif(l.county,''), county_for_zip(b.postal_code, $2)) is not null`,
+    [campaignId, state])
+  return rows.map(r => r.county).filter(Boolean)
+}
+
 async function ingest(campaignId: string, state: string, counties: string): Promise<void> {
   const { rows: [c] } = await db.query<{ niche: string }>(
     `select niche from campaigns where id = $1`, [campaignId])
   const tokens = nicheNameTokens(c.niche)
+
+  if (counties === 'auto') {
+    const derived = await countiesFromLeads(campaignId, state)
+    counties = derived.join(',')
+    console.log(`derived ${derived.length} counties from discovered leads: ${counties || '(none — ingesting statewide)'}`)
+  }
+
   const key = `registry:ingest:${state}:${counties}`
 
   await db.query(`delete from graphile_worker.jobs where key = $1`, [key]).catch(() => {})

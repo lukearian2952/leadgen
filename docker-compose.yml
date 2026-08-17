@@ -53,6 +53,13 @@ x-worker-base: &worker-base
     GOOGLE_MAPS_SCRAPER_URL: http://maps-scraper:8080
     GOOGLE_PLACES_API_KEY: ${GOOGLE_PLACES_API_KEY}
     SOCRATA_APP_TOKEN: ${SOCRATA_APP_TOKEN}
+    # Statewide officer search when the county scope misses. Bounded at 2
+    # matching entities inside registry-match, so a common name is rejected
+    # rather than attached to the wrong business.
+    REGISTRY_REVERSE_STATEWIDE: ${REGISTRY_REVERSE_STATEWIDE:-true}
+    # The four extra candidate shapes measured as a straight loss on the
+    # med spa benchmark. Off unless a niche justifies re-measuring.
+    PATTERN_LADDER_EXTRAS: ${PATTERN_LADDER_EXTRAS:-false}
     # verify-svc uses host networking, so it is reached via the gateway.
     VERIFY_URL: http://host.docker.internal:8080
     VERIFY_IPS: ${VERIFY_IPS}
