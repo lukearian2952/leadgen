@@ -23,6 +23,17 @@ interface NicheRule {
   keywords: string[]
   /** Place types that satisfy the rule. */
   allowed: string[]
+  /**
+   * Words to look for in gosom's free-text `category` when the Place-type
+   * check fails.
+   *
+   * gosom emits one category string ("Vehicle wrapping service", "Sign shop",
+   * "Car detailing service") from a vocabulary that is not Google's Place
+   * types, so a type mismatch alone is weak evidence. Without hints the wrap
+   * run dropped 4 of its 8 discovered businesses as `type_mismatch` — the
+   * filter was rejecting the exact trade it was pointed at.
+   */
+  hints?: string[]
 }
 
 /**
@@ -119,6 +130,8 @@ const NICHE_RULES: NicheRule[] = [
                'paint protection', 'ppf', 'vehicle graphic'],
     allowed: ['car_repair', 'painter', 'car_wash', 'auto_parts_store',
               'general_contractor', 'car_dealer'],
+    hints: ['wrap', 'vinyl', 'graphic', 'sign', 'tint', 'decal', 'detail',
+            'auto body', 'body shop', 'custom car', 'car audio'],
   },
   {
     keywords: ['auto', 'car repair', 'mechanic', 'body shop', 'tire'],
@@ -135,15 +148,48 @@ export interface NicheFilter {
   /** False when no rule matched the niche — rule 5 is then a no-op. */
   active: boolean
   matchedKeyword: string
+  /** Free-text category words that rescue a Place-type mismatch. */
+  hints: string[]
+}
+
+/**
+ * Alternative search phrasings for a niche.
+ *
+ * Google Maps matches the search string against how businesses describe
+ * *themselves*, and the phrase a buyer uses is often not one. Measured on the
+ * live scraper, two cities at depth 10:
+ *
+ *   "vehicle wrap shop in {city}"   →  9 rows
+ *   "car wrap" / "vehicle wraps"    → 19 rows
+ *
+ * Same businesses, same cities, same moment — the trade word is "wrap", and
+ * "shop" narrows it to almost nothing. Returning several phrasings and
+ * deduping on place_id costs one extra query per city and roughly doubles
+ * coverage.
+ *
+ * Only defined where it has been measured. Everything else returns the niche
+ * unchanged, because an invented synonym would silently widen the funnel.
+ */
+export function nicheQueryVariants(niche: string): string[] {
+  const n = niche.toLowerCase()
+  if (/vehicle wrap|car wrap|wrap shop|vinyl wrap/.test(n)) {
+    return ['car wrap', 'vehicle wraps', 'vinyl wrap']
+  }
+  return [niche]
 }
 
 export function resolveNicheFilter(niche: string): NicheFilter {
   const n = niche.toLowerCase()
   for (const rule of NICHE_RULES) {
     const hit = rule.keywords.find(k => n.includes(k))
-    if (hit) return { allowed: new Set(rule.allowed), active: true, matchedKeyword: hit }
+    if (hit) {
+      return {
+        allowed: new Set(rule.allowed), active: true, matchedKeyword: hit,
+        hints: rule.hints ?? [],
+      }
+    }
   }
-  return { allowed: new Set(), active: false, matchedKeyword: '' }
+  return { allowed: new Set(), active: false, matchedKeyword: '', hints: [] }
 }
 
 /**

@@ -13,7 +13,7 @@ import { wrapTask, jobKey } from './wrap.js'
 import type { TaskDeps } from './index.js'
 import { MapsSource, parseCsv, type MapsBusiness } from '../sources/maps.js'
 import { resolveLocationScope, checkInScope } from '../lib/geo.js'
-import { resolveNicheFilter, checkNicheTypes } from '../lib/niche-types.js'
+import { resolveNicheFilter, checkNicheTypes, nicheQueryVariants } from '../lib/niche-types.js'
 import { extractDomain, isJunkDomain } from '../lib/identity.js'
 import { normaliseName } from '../lib/normalise.js'
 import { expandLocation } from '../lib/locations.js'
@@ -24,6 +24,16 @@ interface Payload {
   niche: string
   location: string
   targetCount: number
+  /**
+   * Adopt a scraper job that has already run instead of starting a new one.
+   *
+   * gosom keeps completed jobs and their CSVs. When our wait expires the job
+   * fails, but the scrape underneath usually finishes moments later — the wrap
+   * run timed out at 20 minutes and its job was `ok` with 182 rows shortly
+   * after. Re-scraping to recover that is 20 more minutes of proxy traffic for
+   * data already sitting on disk.
+   */
+  existingJobId?: string
   [key: string]: unknown
 }
 
@@ -36,7 +46,7 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
   const { config, db } = deps
 
   return wrapTask<Payload>({ stage: 'maps:discover', db }, async (payload, ctx) => {
-    const { campaignId, niche, location, targetCount } = payload
+    const { campaignId, niche, location, targetCount, existingJobId } = payload
     const source = new MapsSource(config.mapsScraperUrl, ctx.logger)
 
     const scope = resolveLocationScope(location)
@@ -58,16 +68,34 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
     // wrong place — the failure mode is silent, which is why this is a hard
     // check and not a log line. First run of the auth-forwarding proxy came out
     // of Córdoba, Argentina while claiming US targeting.
-    await assertProxyExit(proxies[0], ctx.logger)
+    if (!existingJobId) await assertProxyExit(proxies[0], ctx.logger)
 
-    const queries = cities.map(city => `${niche} in ${city}`)
+    // ── query set ─────────────────────────────────────────────────────────────
+    //
+    // cities x phrasings, capped. The cap is not cosmetic: the 48-query
+    // statewide "vehicle wrap shop / New York" run came back with 8 rows total
+    // while a 2-query probe of the same niche in the same cities returned 9 at
+    // the same moment — gosom logged 71 `target closed`, 49 `unexpected page
+    // type` and a run of 403/502s, i.e. it fell over under the load rather than
+    // finding nothing. Fewer, denser queries beat more, thinner ones.
+    const variants = nicheQueryVariants(niche)
+    const queries: string[] = []
+    outer: for (const city of cities) {
+      for (const variant of variants) {
+        if (queries.length >= maxQueries()) break outer
+        queries.push(`${variant} in ${city}`)
+      }
+    }
     // maxSeconds is deliberately above our own wait cap: if one of the two has
     // to give up first it should be us, so the scraper's own result is never
     // discarded half-written.
-    const jobId = await source.startJob(
+    const jobId = existingJobId ?? await source.startJob(
       `${campaignId.slice(0, 8)}-maps`, queries, proxies,
       { depth: 10, maxSeconds: Math.round(mapsWaitMs(queries.length) / 1000) + 300 },
     )
+    if (existingJobId) {
+      ctx.logger.info('adopting an already-completed scraper job', { jobId })
+    }
 
     // ── how long to wait ──────────────────────────────────────────────────────
     //
@@ -88,7 +116,8 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
     if (wait.status !== 'ok') {
       throw new Error(
         wait.status === 'ok_but_empty'
-          ? `maps job ${jobId} reported ok but /download stayed empty for the full 20 minute cap`
+          ? `maps job ${jobId} reported ok but /download stayed empty for the full ` +
+            `${Math.round(waitMs / 60_000)} minute cap`
           : `maps job ${jobId} ended ${wait.status}`)
     }
 
@@ -131,6 +160,7 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
         const catText = b.category.toLowerCase()
         const keywordHit = [...nicheFilter.allowed].some(t => catText.includes(t.replace(/_/g, ' ')))
           || catText.includes(nicheFilter.matchedKeyword)
+          || nicheFilter.hints.some(h => catText.includes(h))
         if (!keywordHit) { drop(typeReason); continue }
       }
 
@@ -223,6 +253,19 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
     await ctx.helpers.addJob('campaign:reconcile', { campaignId },
       { jobKey: jobKey('campaign:reconcile', campaignId), runAt: new Date(Date.now() + 60_000) })
   })
+}
+
+/**
+ * Ceiling on queries per discovery job.
+ *
+ * gosom degrades badly past a few dozen concurrent Maps searches — the
+ * statewide wrap run logged 71 `target closed` and a run of 403/502s and
+ * returned 8 rows, while 2 queries against the same cities returned 9. Capping
+ * trades breadth for a scrape that actually completes.
+ */
+export function maxQueries(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.MAPS_MAX_QUERIES ?? '')
+  return Number.isFinite(n) && n > 0 ? n : 36
 }
 
 /** Floor, ceiling and per-query allowance for the discovery wait. */

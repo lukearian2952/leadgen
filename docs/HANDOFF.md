@@ -790,6 +790,130 @@ not preference:
 
 ---
 
+## 14. Niche validation — is the constraint the pipeline or the niche?
+
+Three campaigns, same pipeline, no new sources.
+
+| metric | med spa / LI | dental / LI | vehicle wrap / NY |
+|---|---|---|---|
+| businesses kept | 75 | 79 | 100 |
+| with a website | 96.0% | 82.3% | 87.0% |
+| **named** | 32 (42.7%) | **41 (51.9%)** | 34 (34.0%) |
+| **Tier A** | **1** | **5** | **9** |
+| Tier B | 10 | 8 | 14 |
+| Tier C | 12 | 23 | 5 |
+| **Tier A+B (sendable)** | 11 (14.7%) | 13 (16.5%) | **23 (23.0%)** |
+| named by site_crawl | 19 (25.3%) | 8 (10.1%) | 19 (19.0%) |
+| named by registry | 15 (20.0%) | **22 (27.8%)** | 19 (19.0%) |
+| named by serp | 2 (2.7%) | 0 | 0 |
+| addresses seen by crawl | 140 | 81 | 196 |
+| on own domain | 17 | 29 | 34 |
+| **ON-DOMAIN PERSONAL** | **2** | **12** | **13** |
+| businesses with ≥1 | 2.7% | 8.9% | 9.0% |
+| reverse: checked / hits | 64 / 5 (7.8%) | 129 / 13 (10.1%) | 44 / 1 (2.3%) |
+| cost per business | $0.0129 | $0.0167 | $0.0136 |
+| failed pipeline jobs | 0 | 0 | 0 |
+
+### 14.1 The answer: the niche, and the predictor holds
+
+**On-domain personal addresses 2 → 12 → 13. Tier A 1 → 5 → 9.** Monotonic
+across three niches. The number nominated in §11.8 as predicting Tier A does
+predict it.
+
+**Named-rate does not.** Wrap has the *lowest* named-rate of the three (34.0%)
+and the *highest* Tier A (9) and highest sendable share (23.0%). Med spa has a
+higher named-rate than wrap and one ninth the Tier A. Naming and mailbox
+conversion are independent problems, and Phase 3 solved the wrong one first.
+
+The pipeline is not the constraint. Given businesses that own their mail, it
+converts them.
+
+### 14.2 Where the names come from is niche-specific
+
+- **med spa** — site-led (19 site vs 15 registry). Marketing sites with staff
+  bios and no filing under the trade name.
+- **dental** — registry-led (**22 registry vs 8 site**). Practices file as
+  "SMITH DENTAL PC" and their sites are template brochures.
+- **wrap** — evenly split (19 / 19).
+
+A single naming strategy is wrong for all three. This is an argument for
+keeping every source on rather than tuning one.
+
+**SERP named 0 in both new niches** (2 in med spa). Across 254 businesses it
+has produced two names. On this evidence it does not earn its place.
+
+### 14.3 Tier B composition tracks the same thing
+
+| | med spa | wrap |
+|---|---|---|
+| `freemail_business_verified` | 7 | 8 |
+| `catch_all_named` | 1 | **6** |
+
+`catch_all_named` requires the domain to publish a mailbox. Wrap domains do
+(34 on-domain addresses), so the rule fires six times; med spa domains do not,
+so it fires once. Same rule, same code, different niche.
+
+### 14.4 Statewide reverse fallback — measured, small, real
+
+Measured twice, and the first measurement was a trap. On dental it initially
+returned **0 extra hits from 104 queries** — because `registry_entities` held
+only Nassau+Suffolk, so "statewide" was the same query. The feature was inert
+for want of data, not broken.
+
+After ingesting statewide (NY now 91,787 rows, 63 counties):
+
+- **dental**: 1 extra hit / 103 statewide queries, 0 rejected as a common name.
+  Newly names *All City Cosmetic Dental Care* (Suffolk) via `ALLCITY COSMETIC
+  DENTAL CARE, P.C.` filed in **New York** county.
+- **wrap**: 1 extra hit / 42 statewide queries, 0 rejected. Wrap's *only*
+  reverse hit came from the fallback.
+
+Cost is indexed jsonb containment queries and $0 external. Keep it on.
+
+### 14.5 Discovery is the fragile stage, and it cost three attempts
+
+The wrap campaign took four runs to produce a result. Worth recording because
+none of it was the pipeline downstream of discovery:
+
+1. **Operator error** — I restarted the fleet mid-scrape. graphile holds a
+   stale lock for 4 h; the job had to be cleared from
+   `graphile_worker._private_jobs` by hand. **Never restart a worker while a
+   `maps:discover` is in flight.**
+2. **Phrasing.** `"vehicle wrap shop in {city}"` returned 8 rows across 48
+   queries. Measured against `"car wrap"` / `"vehicle wraps"` on the same two
+   cities at the same moment: 9 rows vs **19**. The trade word is "wrap";
+   "shop" narrows it to nothing. Now in `nicheQueryVariants`, defined only
+   where measured.
+3. **Query count.** 48 concurrent queries made gosom fall over — 71 `target
+   closed`, 49 `unexpected page type`, a run of 403/502s. Capped at 36
+   (`MAPS_MAX_QUERIES`). Fewer, denser queries beat more, thinner ones.
+4. **Our own patience.** Both retries timed out at 20 minutes; the scraper job
+   reached `ok` with **182 rows** minutes later. The wait now scales with query
+   count, and `maps:discover` accepts `existingJobId` to adopt a scrape that
+   finished after we gave up — which is how this run was finally completed,
+   without a fourth scrape.
+5. **The category filter** dropped 4 of the first 8 as `type_mismatch` — it was
+   rejecting the exact trade it was aimed at, because gosom's category
+   vocabulary is not Google Place types. Niche rules now carry free-text
+   `hints`.
+
+The 8 → 182 improvement is items 2 and 3 together.
+
+### 14.6 What this means for Phase 4 proper
+
+1. **Sell into niches that own their mail.** The census is a one-crawl
+   qualifier: run 20 businesses, count on-domain personal addresses, and the
+   Tier A rate follows. That is worth building as a pre-flight check.
+2. **Med spa is close to the worst case** and was the benchmark for three
+   phases. Every conclusion drawn from it about the *pipeline* was
+   contaminated by the niche.
+3. **SERP is not earning its cost** — 2 names in 254 businesses.
+4. **Discovery, not enrichment, is where runs fail.** Every failure in this
+   phase was a scrape; the queue, naming and verification stages have run 254
+   businesses with **zero** pipeline failures.
+
+---
+
 ## 9. Commit history
 
 | Commit | What |
