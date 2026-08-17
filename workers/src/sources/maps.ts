@@ -114,6 +114,7 @@ export class MapsSource {
     const deadline = Date.now() + maxMs
     let last = ''
     let sawOkButEmpty = false
+    let previousBytes = -1
 
     while (Date.now() < deadline) {
       last = await this.status(jobId)
@@ -122,11 +123,21 @@ export class MapsSource {
 
       if (last === 'ok') {
         const body = await this.rawResults(jobId)
-        if (body.trim().length > 0) {
+
+        if (body.trim().length === 0) {
+          // Reported complete with nothing to show for it: keep waiting.
+          sawOkButEmpty = true
+        } else if (body.length === previousBytes) {
+          // Non-empty AND unchanged since the previous poll. Status alone is not
+          // enough and neither is non-emptiness: measured on a real run, the
+          // worker read 1,038,254 bytes from a job already reporting `ok` and
+          // the file was 1,043,361 a minute later. The status flips while the
+          // scraper is still writing, so a size that has stopped moving is the
+          // only available evidence the write finished.
           return { status: 'ok', bytes: body.length, okButEmptyPolls: 0, body }
+        } else {
+          previousBytes = body.length
         }
-        // Reported complete with nothing to show for it: keep waiting.
-        sawOkButEmpty = true
       }
 
       await new Promise(r => setTimeout(r, pollMs))

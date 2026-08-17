@@ -132,18 +132,26 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
       linkedInProfileLinksToDomain: false,
     })
 
+    // Domain-level catch-all counts as catch-all for this address, because the
+    // server accepting anything is a property of the domain, not the mailbox.
+    const isCatchAll = chosen.is_catch_all || catchAll
+
     const tier = assignTier({
       status: chosen.status,
-      isCatchAll: chosen.is_catch_all || catchAll,
+      isCatchAll,
       hasName: true,
       hasDomain: true,
       score,
     })
 
+    // The reason has to be derived from the same `isCatchAll` the tier used.
+    // Testing `chosen.is_catch_all` alone produced `not_deliverable:safe` — a
+    // deliverable address on a domain-level catch-all, correctly held out of
+    // Tier A but labelled as though the mailbox had failed.
     const rejectReason = tier === 'A' ? ''
       : tier === 'B' ? `catch_all_scored:${score}`
       : chosen.status === 'invalid' ? 'mailbox_invalid'
-      : chosen.is_catch_all ? `catch_all_low_score:${score}`
+      : isCatchAll ? `catch_all_low_score:${score}`
       : `not_deliverable:${chosen.status}`
 
     await db.query(
