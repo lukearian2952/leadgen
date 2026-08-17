@@ -18,8 +18,11 @@ import { assignTier, scoreCandidate, type VerifyResult } from '../verify/types.j
 import { candidatesFor, foldPattern, inferPattern, type PatternName, type PatternRecord } from '../lib/patterns.js'
 import {
   extractDomain, isJunkDomain, isFreemail, freemailAllowed,
-  isGenericLocalPart, checkFirstName, emailDomain,
+  isGenericLocalPart, checkFirstName, emailDomain, isValidEmail,
 } from '../lib/identity.js'
+import {
+  freemailBusinessVerified, FREEMAIL_TIER_REASON,
+} from '../lib/freemail.js'
 import { hasMx } from '../lib/dns.js'
 
 interface Payload { campaignId: string; leadId: string; [key: string]: unknown }
@@ -32,6 +35,8 @@ interface LeadRow {
   owner_first_name: string
   owner_last_name: string
   owner_source: string
+  name_class: string
+  corroboration: string[] | null
   title: string
   email: string
   evidence: Record<string, unknown>
@@ -45,7 +50,7 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
 
     const { rows } = await db.query<LeadRow>(
       `select id, business_id, business_name, website, owner_first_name, owner_last_name,
-              owner_source, title, email, evidence
+              owner_source, name_class, corroboration, title, email, evidence
          from leads where id = $1`, [leadId])
     const lead = rows[0]
     if (!lead) { ctx.logger.warn('lead vanished'); return }
@@ -64,11 +69,106 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
     const nameReason = checkFirstName(lead.owner_first_name)
     const hasName = !nameReason
 
+    // Addresses the business itself published — scraped from its own site or
+    // read off its Google listing. These are the only ones the freemail path
+    // will ever consider; a *generated* gmail guess is someone else's mailbox
+    // and it will deliver.
+    const published = await publishedAddresses(db, campaignId, leadId, lead)
+
+    const highTrust = ['registry', 'linkedin', 'serp'].some(s => lead.owner_source.includes(s))
+
+    /**
+     * The Phase 3 freemail path, for a business whose own domain cannot carry
+     * mail. Verifies the published consumer addresses and admits at most one,
+     * at Tier B, under lib/freemail.ts's four conditions.
+     */
+    const tryPublishedFreemail = async (
+      mxReason: string, addresses: string[],
+    ): Promise<void> => {
+      const freemails = addresses.filter(e => isFreemail(emailDomain(e)))
+      if (!freemails.length) return finish('rejected', mxReason)
+
+      const verifier = buildVerifier(config, db, ctx.logger, campaignId)
+      const outcome = await verifier.verify(
+        campaignId, freemails.map(email => ({ email, highTrustName: highTrust })))
+      ctx.cost.cents = outcome.stats.spendCents
+
+      let rejectReason = `${mxReason}:freemail_none_admissible`
+      for (const result of outcome.results) {
+        const verdict = freemailBusinessVerified({
+          email: result.email,
+          businessName: lead.business_name,
+          ownerFirst: lead.owner_first_name,
+          ownerLast: lead.owner_last_name,
+          publishedAddresses: addresses,
+          status: result.status,
+          isCatchAll: result.is_catch_all,
+        })
+        if (!verdict.accepted) { rejectReason = verdict.reason; continue }
+
+        // Tier B by construction. The policy is explicit that this route never
+        // reaches Tier A: the address is right, but it is a consumer mailbox
+        // the business chose rather than a mailbox on a domain it controls.
+        const score = scoreCandidate({
+          nameFromRegistryOrLinkedIn: highTrust,
+          nameFromSiteWithOwnerTitle: lead.owner_source === 'site_crawl' && Boolean(lead.title),
+          patternMatchesKnownDomainPattern: false,
+          emailSeenOnSiteOrMailto: true,
+          linkedInProfileLinksToDomain: false,
+        })
+
+        await writeContact(db, campaignId, lead, result, 'B', score,
+          '', FREEMAIL_TIER_REASON, [lead.owner_source || 'site_crawl'], {
+            freemail_matched_token: verdict.matchedToken ?? null,
+            mx_status: mxReason,
+            published_addresses: addresses,
+          })
+
+        await db.query(
+          `update leads
+              set enrich_done = true, tier = 'B', score = $2, reject_reason = '',
+                  tier_reason = $3, owner_email = $4, email_status = $5,
+                  evidence = evidence || $6::jsonb
+            where id = $1`,
+          [leadId, score, FREEMAIL_TIER_REASON, result.email, result.status,
+           JSON.stringify({
+             freemail_tier_b: {
+               email: result.email, matched_token: verdict.matchedToken ?? null,
+               mx_status: mxReason, provider: result.provider,
+             },
+           })])
+
+        ctx.cost.detail = {
+          tier: 'B', tier_reason: FREEMAIL_TIER_REASON, score,
+          status: result.status, mx_status: mxReason,
+          verifalia_checks: outcome.stats.verifaliaChecks,
+          verify_svc_checks: outcome.stats.verifySvcChecks,
+        }
+        return
+      }
+
+      return finish('rejected', rejectReason, {
+        freemail_considered: freemails,
+        verifalia_checks: outcome.stats.verifaliaChecks,
+      })
+    }
+
     // ── MX ────────────────────────────────────────────────────────────────────
+    //
+    // A domain with no MX cannot carry mail, and Phase 2 stopped there — which
+    // is where 22 of 75 leads died, 8 of them while publishing a working Gmail
+    // on their own homepage. Those are site-builder domains (glossgenius.com,
+    // square.site) where the business genuinely runs its mail on a consumer
+    // provider. So a missing MX is no longer the end of the row: it routes to
+    // the published-freemail path, which is Tier B at best and rejects on any
+    // of its four conditions failing.
     const mxOk = await hasMx(domain)
     await db.query(`update leads set mx_ok = $2 where id = $1`, [leadId, mxOk])
-    if (mxOk === false) return finish('rejected', 'no_mx')
-    if (mxOk === null) return finish('rejected', 'mx_unknown')
+    if (mxOk !== true) {
+      if (!hasName) return finish('rejected', nameReason!)
+      return tryPublishedFreemail(
+        mxOk === false ? 'no_mx' : 'mx_unknown', published)
+    }
 
     if (!hasName) return finish('rejected', nameReason!)
 
@@ -89,10 +189,10 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
     if (!toCheck.length) return finish('rejected', 'no_candidate_addresses')
 
     // ── verify ────────────────────────────────────────────────────────────────
-    // High trust = registry or LinkedIn. In Phase 2 neither source exists yet,
-    // so nothing earns a paid Verifalia second opinion and the budget stays
-    // untouched — deliberately, not accidentally.
-    const highTrust = ['registry', 'linkedin'].some(s => lead.owner_source.includes(s))
+    // High trust = registry, LinkedIn or SERP — the sources that corroborate a
+    // name from outside the business's own marketing copy. Phase 2 had none of
+    // them, so nothing earned a paid Verifalia second opinion and the budget
+    // went untouched. Phase 3 has two, so it starts being spent.
     const candidates: Candidate[] = toCheck.map(email => ({ email, highTrustName: highTrust }))
 
     const verifier = buildVerifier(config, db, ctx.logger, campaignId)
@@ -115,11 +215,29 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
 
     if (!chosen) return finish('rejected', 'no_verdict')
 
-    // Freemail survives only under the narrow rule.
+    // Freemail. v1's narrow rule first — an owner-named mailbox at a business
+    // that runs entirely on a consumer provider. Failing that, the Phase 3
+    // path, which admits a *published, business-named* address at Tier B only.
     const mailDomain = emailDomain(chosen.email)
+    let freemailTierB = false
+    let freemailToken: string | undefined
+
     if (isFreemail(mailDomain) &&
         !freemailAllowed(chosen.email, lead.owner_first_name, lead.owner_last_name, domain)) {
-      return finish('rejected', `freemail:${mailDomain}`)
+      const verdict = freemailBusinessVerified({
+        email: chosen.email,
+        businessName: lead.business_name,
+        ownerFirst: lead.owner_first_name,
+        ownerLast: lead.owner_last_name,
+        publishedAddresses: published,
+        status: chosen.status,
+        isCatchAll: chosen.is_catch_all || catchAll,
+      })
+      if (!verdict.accepted) return finish('rejected', `freemail:${mailDomain}`, {
+        freemail_reject: verdict.reason,
+      })
+      freemailTierB = true
+      freemailToken = verdict.matchedToken
     }
 
     // ── score + tier ──────────────────────────────────────────────────────────
@@ -136,7 +254,7 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
     // server accepting anything is a property of the domain, not the mailbox.
     const isCatchAll = chosen.is_catch_all || catchAll
 
-    const tier = assignTier({
+    const naturalTier = assignTier({
       status: chosen.status,
       isCatchAll,
       hasName: true,
@@ -144,40 +262,40 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
       score,
     })
 
+    // The freemail path is capped at Tier B by policy, never Tier A. A
+    // published consumer mailbox verifying `safe` would otherwise land in the
+    // main CSV, and the whole point of the concession is that it does not.
+    const tier = freemailTierB ? (naturalTier === 'rejected' ? 'rejected' : 'B') : naturalTier
+
     // The reason has to be derived from the same `isCatchAll` the tier used.
     // Testing `chosen.is_catch_all` alone produced `not_deliverable:safe` — a
     // deliverable address on a domain-level catch-all, correctly held out of
     // Tier A but labelled as though the mailbox had failed.
     const rejectReason = tier === 'A' ? ''
+      : freemailTierB ? ''
       : tier === 'B' ? `catch_all_scored:${score}`
       : chosen.status === 'invalid' ? 'mailbox_invalid'
       : isCatchAll ? `catch_all_low_score:${score}`
       : `not_deliverable:${chosen.status}`
 
-    await db.query(
-      `insert into contacts
-         (campaign_id, lead_id, business_id, email, email_kind, status, is_catch_all,
-          is_role, is_disposable, provider, tier, score, reject_reason, sources, evidence, verified_at)
-       values ($1,$2,$3,$4,'owner',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now())
-       on conflict (campaign_id, email) where email <> '' do update
-         set status = excluded.status, tier = excluded.tier, score = excluded.score,
-             is_catch_all = excluded.is_catch_all, provider = excluded.provider,
-             reject_reason = excluded.reject_reason, verified_at = now()`,
-      [campaignId, leadId, lead.business_id, chosen.email, chosen.status,
-       chosen.is_catch_all, chosen.is_role, chosen.is_disposable, chosen.provider,
-       tier, score, rejectReason,
-       [lead.owner_source || 'site_crawl'],
-       JSON.stringify({
-         candidates_tried: toCheck,
-         pattern_used: known?.pattern ?? null,
-         verifier_detail: chosen.detail,
-         owner_title: lead.title,
-       })])
+    const tierReason = freemailTierB ? FREEMAIL_TIER_REASON
+      : tier === 'B' ? `catch_all_scored:${score}`
+      : ''
+
+    await writeContact(db, campaignId, lead, chosen, tier, score,
+      rejectReason, tierReason, [lead.owner_source || 'site_crawl'], {
+        candidates_tried: toCheck,
+        pattern_used: known?.pattern ?? null,
+        verifier_detail: chosen.detail,
+        owner_title: lead.title,
+        freemail_matched_token: freemailToken ?? null,
+      })
 
     await db.query(
       `update leads
           set enrich_done = true, tier = $2, score = $3, reject_reason = $4,
               owner_email = $5, email_status = $6, domain_catch_all = $7,
+              tier_reason = $9,
               evidence = evidence || $8::jsonb
         where id = $1`,
       [leadId, tier, score, rejectReason,
@@ -190,7 +308,7 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
          pattern_used: known?.pattern ?? null,
          score_signals: { high_trust: highTrust, site_title: Boolean(lead.title),
                           seen_on_site: chosen.email === siteEmail },
-       })])
+       }), tierReason])
 
     // A confirmed-good address teaches this domain's pattern for every future
     // lead on it. This is the compounding asset in the whole design.
@@ -202,6 +320,9 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
     ctx.cost.cents = outcome.stats.spendCents
     ctx.cost.detail = {
       tier, score, status: chosen.status, catch_all: chosen.is_catch_all,
+      tier_reason: tierReason || undefined,
+      name_class: lead.name_class || undefined,
+      corroboration: lead.corroboration ?? [],
       candidates: toCheck.length,
       verify_svc_checks: outcome.stats.verifySvcChecks,
       verifalia_checks: outcome.stats.verifaliaChecks,
@@ -209,6 +330,63 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
       pattern_used: known?.pattern ?? null,
     }
   })
+}
+
+/**
+ * Addresses the business itself published — from its own site (recorded as a
+ * contact by crawl:site) and from its Google listing (gosom's `emails` column,
+ * kept in the lead's evidence).
+ *
+ * The freemail path checks membership of this set, so it must never contain a
+ * generated candidate. Everything here was read off something the business
+ * controls.
+ */
+async function publishedAddresses(
+  db: TaskDeps['db'], campaignId: string, leadId: string, lead: LeadRow,
+): Promise<string[]> {
+  const out = new Set<string>()
+
+  const { rows } = await db.query<{ email: string }>(
+    `select email from contacts
+      where campaign_id = $1 and lead_id = $2 and email <> ''
+        and 'site_crawl' = any(sources)`, [campaignId, leadId])
+  for (const r of rows) out.add(r.email.toLowerCase())
+
+  // crawl:site writes the best general/personal inbox it found to leads.email.
+  if (lead.email && isValidEmail(lead.email)) out.add(lead.email.toLowerCase())
+
+  const mapsEmails = (lead.evidence?.maps_emails as string[] | undefined) ?? []
+  for (const e of mapsEmails) if (isValidEmail(e)) out.add(e.toLowerCase())
+
+  const crawlEmails = (lead.evidence?.crawl_emails as string[] | undefined) ?? []
+  for (const e of crawlEmails) if (isValidEmail(e)) out.add(e.toLowerCase())
+
+  return [...out]
+}
+
+/** One place that writes a `contacts` row, so both tier paths agree on shape. */
+async function writeContact(
+  db: TaskDeps['db'], campaignId: string, lead: LeadRow, result: VerifyResult,
+  tier: string, score: number, rejectReason: string, tierReason: string,
+  sources: string[], evidence: Record<string, unknown>,
+): Promise<void> {
+  await db.query(
+    `insert into contacts
+       (campaign_id, lead_id, business_id, email, email_kind, status, is_catch_all,
+        is_role, is_disposable, provider, tier, score, reject_reason, tier_reason,
+        name_class, corroboration, sources, evidence, verified_at)
+     values ($1,$2,$3,$4,'owner',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::text[],$16,$17,now())
+     on conflict (campaign_id, email) where email <> '' do update
+       set status = excluded.status, tier = excluded.tier, score = excluded.score,
+           is_catch_all = excluded.is_catch_all, provider = excluded.provider,
+           reject_reason = excluded.reject_reason, tier_reason = excluded.tier_reason,
+           name_class = excluded.name_class, corroboration = excluded.corroboration,
+           verified_at = now()`,
+    [campaignId, lead.id, lead.business_id, result.email, result.status,
+     result.is_catch_all, result.is_role, result.is_disposable, result.provider,
+     tier, score, rejectReason, tierReason,
+     lead.name_class, lead.corroboration ?? [], sources,
+     JSON.stringify(evidence)])
 }
 
 async function loadPattern(db: TaskDeps['db'], domain: string): Promise<PatternRecord | null> {

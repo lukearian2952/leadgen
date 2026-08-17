@@ -137,6 +137,73 @@ export const PEOPLE_SCHEMA = {
   },
 } as const
 
+/**
+ * SERP extraction schema.
+ *
+ * `source_url` rather than a result index: the model is asked to copy the URL
+ * it read the claim from, which is checkable against the results we actually
+ * passed in. An index is trivially hallucinated as a plausible small number
+ * and tells us nothing when it is wrong.
+ */
+export const SERP_PEOPLE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['people'],
+  properties: {
+    people: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['full_name', 'title', 'source_url', 'confidence'],
+        properties: {
+          full_name: { type: 'string', description: 'Person name exactly as written in the result.' },
+          title: { type: 'string', description: 'Their stated role, verbatim. Empty string if none.' },
+          source_url: { type: 'string', description: 'The URL of the result this came from, copied exactly.' },
+          confidence: {
+            type: 'string', enum: ['high', 'medium', 'low'],
+            description: 'high only when one result states both the name and the role for this exact business.',
+          },
+        },
+      },
+    },
+  },
+} as const
+
+/**
+ * Extraction from search results rather than from a page the business controls.
+ *
+ * The failure mode here is different from the site crawl's and worse: search
+ * results for "Radiance Med Spa owner" will happily return the owner of a
+ * different Radiance Med Spa in another state, and the name will be real, so
+ * no hallucination check catches it. Hence the emphasis on the business having
+ * to be the one named, and on copying the source URL.
+ */
+export function serpOwnerPrompt(
+  businessName: string, town: string, resultsText: string,
+): string {
+  return `You are identifying the owner or founder of a specific small local business from web search results.
+
+Business: ${businessName}
+Location: ${town || 'unknown'}
+
+Search results follow between the markers. Each is numbered, with its title, URL and snippet.
+
+---BEGIN RESULTS---
+${resultsText}
+---END RESULTS---
+
+Return every individual the results identify as running THIS business, with their stated role.
+
+Rules:
+- The result must be about this exact business at this location. Search results frequently describe a similarly-named business elsewhere; if you cannot tell that a result is about this one, do not return anything from it.
+- Only real people. Never return the business name, a department, or a title with no person attached.
+- Copy names, titles and URLs verbatim. Do not infer, complete, or reformat a name.
+- Directory listings and review sites usually name no owner. An empty array is the correct answer far more often than not.
+- Use confidence "high" only when a single result states both the person's name and their role at this business.
+- Return an empty array if no individual is identified.`
+}
+
 export function peoplePrompt(businessName: string, pageText: string): string {
   return `You are extracting the owner or principal decision-maker of a small local business from its own website.
 

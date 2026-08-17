@@ -58,15 +58,32 @@ export function makeReconcileTask(deps: TaskDeps): Task {
           { jobKey: jobKey('crawl:site', campaignId, lead.id), maxAttempts: 3 })
       }
 
+      // Phase 3 put two naming stages between the crawl and enrichment, so
+      // "crawled but not enriched" is no longer one gap but two. Re-enqueueing
+      // enrich:lead for a lead that has not been through registry:match would
+      // silently skip naming altogether and reproduce the Phase 2 result.
+      //
+      // `not enrich_done` is on both queries because maps:discover finalises
+      // website-less leads outright (crawl_done and enrich_done, never named);
+      // without it those would be re-enqueued for naming forever.
+      const { rows: stalledName } = await db.query<{ id: string }>(
+        `select id from leads
+          where campaign_id = $1 and crawl_done and not name_done and not enrich_done
+          limit 200`, [campaignId])
+      for (const lead of stalledName) {
+        await ctx.helpers.addJob('registry:match', { campaignId, leadId: lead.id },
+          { jobKey: jobKey('registry:match', campaignId, lead.id), maxAttempts: 3 })
+      }
+
       const { rows: stalledEnrich } = await db.query<{ id: string }>(
         `select id from leads
-          where campaign_id = $1 and crawl_done and not enrich_done limit 200`, [campaignId])
+          where campaign_id = $1 and name_done and not enrich_done limit 200`, [campaignId])
       for (const lead of stalledEnrich) {
         await ctx.helpers.addJob('enrich:lead', { campaignId, leadId: lead.id },
           { jobKey: jobKey('enrich:lead', campaignId, lead.id), maxAttempts: 3 })
       }
 
-      const outstanding = stalledCrawl.length + stalledEnrich.length
+      const outstanding = stalledCrawl.length + stalledName.length + stalledEnrich.length
       if (outstanding > 0) {
         ctx.logger.info('campaign still working', {
           campaignId, total, enriched, requeued: outstanding })

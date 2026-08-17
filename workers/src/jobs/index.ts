@@ -17,6 +17,9 @@ import { makeMapsDiscoverTask } from './maps-discover.js'
 import { makeCrawlSiteTask } from './crawl-site.js'
 import { makeEnrichLeadTask } from './enrich-lead.js'
 import { makeReconcileTask } from './reconcile.js'
+import { makeRegistryIngestTask } from './registry-ingest.js'
+import { makeRegistryMatchTask } from './registry-match.js'
+import { makeSerpOwnerTask } from './serp-owner.js'
 
 export interface TaskDeps {
   config: Config
@@ -27,7 +30,7 @@ export interface TaskDeps {
 /** Which roles run which stages. 'all' runs everything. */
 const ROLE_STAGES: Record<Exclude<WorkerRole, 'all'>, string[]> = {
   maps:      ['maps:discover'],
-  serp:      ['serp:search'],
+  serp:      ['serp:owner'],
   crawl:     ['crawl:site'],
   linkedin:  ['linkedin:company', 'linkedin:person'],
   registry:  ['registry:match', 'registry:ingest'],
@@ -57,6 +60,12 @@ export function buildTaskList(deps: TaskDeps): TaskList {
     'verify:batch':       makeVerifyBatchTask(deps),
     'maps:discover':      makeMapsDiscoverTask(deps),
     'crawl:site':         makeCrawlSiteTask(deps),
+    // Phase 3 naming stages. The chain is
+    //   crawl:site → registry:match → [serp:owner] → enrich:lead
+    // with registry:match deciding whether SERP is worth buying for a lead.
+    'registry:ingest':    makeRegistryIngestTask(deps),
+    'registry:match':     makeRegistryMatchTask(deps),
+    'serp:owner':         makeSerpOwnerTask(deps),
     'enrich:lead':        makeEnrichLeadTask(deps),
     'campaign:reconcile': makeReconcileTask(deps),
   }

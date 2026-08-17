@@ -16,9 +16,12 @@ import { CrawlSource, nameAppearsInText } from '../sources/crawl.js'
 import { ProxyPool } from '../proxy/pool.js'
 import { askJson, peoplePrompt, PEOPLE_SCHEMA, usageCostCents, zeroUsage, addUsage } from '../lib/llm.js'
 import {
-  parseName, isOwnerTitle, isGenericLocalPart, isJunkDomain,
+  parseName, isGenericLocalPart, isJunkDomain,
   emailDomain, isValidEmail,
 } from '../lib/identity.js'
+import { classifyPerson, hasOwnershipVoice } from '../lib/name-class.js'
+import { putCandidates, putSiteSignals } from './name-store.js'
+import type { NameCandidate } from '../lib/name-decision.js'
 
 interface Payload {
   campaignId: string
@@ -50,7 +53,9 @@ export function makeCrawlSiteTask(deps: TaskDeps): Task {
       await db.query(
         `update leads set crawl_done = true, evidence = evidence || $2::jsonb where id = $1`,
         [leadId, JSON.stringify({ ...evidence, crawl_error: result.error ?? 'no pages' })])
-      await queueEnrich(ctx, campaignId, leadId)
+      await putSiteSignals(db, leadId, { peopleNamedOnSite: 0, ownershipVoice: false })
+      await putCandidates(db, leadId, 'site_crawl', [])
+      await queueRegistry(ctx, campaignId, leadId)
       ctx.cost.detail = { pages: 0, error: result.error, bytes_by_pool: result.bytesByPool }
       return
     }
@@ -63,8 +68,23 @@ export function makeCrawlSiteTask(deps: TaskDeps): Task {
     const generalEmail = onDomain.find(e => isGenericLocalPart(e)) ?? ''
     const personalEmail = onDomain.find(e => !isGenericLocalPart(e)) ?? ''
 
-    // ── owner name ────────────────────────────────────────────────────────────
-    let first = '', last = '', title = '', isDoctor = false, ownerSource = ''
+    // ── people ────────────────────────────────────────────────────────────────
+    //
+    // Phase 2 took the first owner-titled person and dropped everyone else.
+    // The audit showed what that cost: 21 of 75 leads had a real person on
+    // their own site and were discarded because "board-certified Nurse
+    // Practitioner" is not an ownership claim.
+    //
+    // Now every corroborated person is kept as a candidate with a class, and
+    // whether a clinical_lead is usable is decided later, once the registry
+    // and SERP have had their say. This stage's job is to observe, not to
+    // judge.
+    const candidates: NameCandidate[] = []
+    let isDoctor = false
+    /** Distinct people the site names at all — the denominator for the
+     *  sole-person-on-site corroboration. Counted before classification, so a
+     *  site listing six estheticians is correctly "six people, not one". */
+    let peopleNamedOnSite = 0
 
     if (config.anthropicApiKey && result.text.length > 200) {
       const llm = await askJson<{ people?: Array<{ full_name?: string; title?: string; confidence?: string }> }>(
@@ -76,43 +96,61 @@ export function makeCrawlSiteTask(deps: TaskDeps): Task {
       if (llm.error) ctx.logger.warn('haiku extraction failed', { err: llm.error })
 
       const people = llm.data?.people ?? []
-      evidence.people_found = people.slice(0, 5)
+      evidence.people_found = people.slice(0, 8)
 
+      const seen = new Set<string>()
       for (const person of people) {
-        if (!isOwnerTitle(person.title ?? '')) continue
         const parsed = parseName(person.full_name ?? '')
         if (parsed.reject) continue
-        // Corroboration: the page must actually contain the name.
+        // Corroboration: the page must actually contain the name. Without this
+        // the model will invent a plausible owner for any business.
         if (!nameAppearsInText(parsed.first, parsed.last, result.text)) {
           evidence.rejected_uncorroborated = person.full_name
           continue
         }
-        first = parsed.first; last = parsed.last
-        title = (person.title ?? '').trim()
-        isDoctor = parsed.isDoctor
-        ownerSource = 'site_crawl'
-        break
+
+        const key = `${parsed.first}|${parsed.last}`.toLowerCase()
+        if (seen.has(key)) continue
+        seen.add(key)
+        peopleNamedOnSite++
+
+        const title = (person.title ?? '').trim()
+        const nameClass = classifyPerson(person.full_name ?? '', title)
+        if (nameClass === 'staff') continue
+
+        if (parsed.isDoctor) isDoctor = true
+        candidates.push({
+          source: 'site_crawl',
+          first: parsed.first, last: parsed.last, title, nameClass,
+          confidence: person.confidence === 'high' ? 0.9
+                    : person.confidence === 'medium' ? 0.6 : 0.3,
+          detail: { raw_name: person.full_name ?? '', model_confidence: person.confidence ?? null },
+        })
       }
     }
 
-    evidence.owner_source = ownerSource || 'none'
-    if (title) evidence.owner_title = title
+    // The other half of the sole-person test. Cheap, and only ever consulted
+    // when exactly one person was named.
+    const ownershipVoice = hasOwnershipVoice(result.text)
+
+    evidence.site_people_count = peopleNamedOnSite
+    evidence.site_ownership_voice = ownershipVoice
+    evidence.site_candidates = candidates.map(c => ({
+      name: [c.first, c.last].filter(Boolean).join(' '), title: c.title, name_class: c.nameClass,
+    }))
 
     await db.query(
       `update leads
           set crawl_done = true,
-              owner_first_name = coalesce(nullif($2,''), owner_first_name),
-              owner_last_name  = coalesce(nullif($3,''), owner_last_name),
-              owner_name       = coalesce(nullif($4,''), owner_name),
-              title            = coalesce(nullif($5,''), title),
-              is_doctor        = $6 or is_doctor,
-              owner_source     = coalesce(nullif($7,''), owner_source),
-              email            = coalesce(nullif($8,''), email),
-              sources          = array(select distinct unnest(sources || array['site_crawl'])),
-              evidence         = evidence || $9::jsonb
+              is_doctor  = $2 or is_doctor,
+              email      = coalesce(nullif($3,''), email),
+              sources    = array(select distinct unnest(sources || array['site_crawl'])),
+              evidence   = evidence || $4::jsonb
         where id = $1`,
-      [leadId, first, last, [first, last].filter(Boolean).join(' '), title, isDoctor,
-       ownerSource, generalEmail || personalEmail, JSON.stringify(evidence)])
+      [leadId, isDoctor, generalEmail || personalEmail, JSON.stringify(evidence)])
+
+    await putSiteSignals(db, leadId, { peopleNamedOnSite, ownershipVoice })
+    await putCandidates(db, leadId, 'site_crawl', candidates)
 
     // A personal-looking address already on the site is the strongest possible
     // candidate: it needs no pattern guess, only verification.
@@ -130,7 +168,11 @@ export function makeCrawlSiteTask(deps: TaskDeps): Task {
       pages: result.pages.length,
       bytes_by_pool: result.bytesByPool,
       escalated: result.escalated,
-      named: Boolean(first),
+      people_on_site: peopleNamedOnSite,
+      ownership_voice: ownershipVoice,
+      candidates: candidates.length,
+      owner_grade: candidates.filter(c => c.nameClass === 'owner_grade').length,
+      clinical_lead: candidates.filter(c => c.nameClass === 'clinical_lead').length,
       emails_found: onDomain.length,
       haiku_calls: usage.calls,
       haiku_input_tokens: usage.inputTokens,
@@ -140,13 +182,24 @@ export function makeCrawlSiteTask(deps: TaskDeps): Task {
     await recordSourceCost(db, campaignId, 'site_crawl', 'crawl',
       1, result.bytesByPool, usage.inputTokens, usage.outputTokens, ctx.cost.cents)
 
-    await queueEnrich(ctx, campaignId, leadId)
+    await queueRegistry(ctx, campaignId, leadId)
   })
 }
 
-async function queueEnrich(ctx: JobContext, campaignId: string, leadId: string) {
-  await ctx.helpers.addJob('enrich:lead', { campaignId, leadId },
-    { jobKey: jobKey('enrich:lead', campaignId, leadId), maxAttempts: 3 })
+/**
+ * Next stage is the registry, not enrichment.
+ *
+ * Phase 3 inserts two naming stages between the crawl and the mailbox work:
+ * `crawl:site → registry:match → [serp:owner] → enrich:lead`. registry:match
+ * decides for itself whether SERP is worth buying, so this is the only hop
+ * crawl needs to know about.
+ *
+ * A lead whose crawl found nothing still goes here — a business with an
+ * unreachable website can still be named by its state filing.
+ */
+async function queueRegistry(ctx: JobContext, campaignId: string, leadId: string) {
+  await ctx.helpers.addJob('registry:match', { campaignId, leadId },
+    { jobKey: jobKey('registry:match', campaignId, leadId), maxAttempts: 3 })
 }
 
 export async function recordSourceCost(

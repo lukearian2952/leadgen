@@ -40,6 +40,14 @@ x-worker-base: &worker-base
     DECODO_HOST: ${DECODO_HOST}
     DECODO_PORT: ${DECODO_PORT}
     DECODO_STICKY_TTL: ${DECODO_STICKY_TTL:-600}
+    # These three are set in .env but were never passed into the containers, so
+    # every worker logged them as missing at boot. Behaviour was correct anyway
+    # — config.ts defaults country to 'us' and the ports to 10001-10100 — but
+    # three false "optional config missing" warnings on every start is exactly
+    # the noise that hides a real one.
+    DECODO_COUNTRY: ${DECODO_COUNTRY:-us}
+    DECODO_STICKY_PORT_MIN: ${DECODO_STICKY_PORT_MIN:-10001}
+    DECODO_STICKY_PORT_MAX: ${DECODO_STICKY_PORT_MAX:-10100}
     SEARXNG_URL: http://searxng:8080
     CRAWL4AI_URL: http://crawl4ai:11235
     GOOGLE_MAPS_SCRAPER_URL: http://maps-scraper:8080
@@ -254,15 +262,33 @@ services:
       WORKER_CONCURRENCY: 1
     ports: ["127.0.0.1:9108:9100"]
 
-  # Phase 3/4 roles — not started by default, so the box stays under budget.
+  # ── Phase 3 naming stages ───────────────────────────────────────────────────
+  #
+  # Promoted out of the `full` profile: `crawl:site → registry:match →
+  # [serp:owner] → enrich:lead` is the default pipeline from Phase 3 on, so a
+  # default-profile `up` that omitted these would leave every lead parked
+  # between crawl and enrichment.
+  #
+  # **This is the connection ceiling.** Supavisor allows ~15 session-mode
+  # clients project-wide, graphile-worker needs session mode for LISTEN/NOTIFY,
+  # and each worker is capped at 2. Seven workers ≈ 14 slots. An eighth
+  # crash-loops on EMAXCONNSESSION — so linkedin-worker stays behind `full`,
+  # and Phase 4 has to scale something down before it can start.
+  registry-worker:
+    <<: *worker-base
+    environment:
+      <<: *worker-env
+      WORKER_ROLE: registry
+    ports: ["127.0.0.1:9105:9100"]
+
   serp-worker:
     <<: *worker-base
-    profiles: ["full"]
     environment:
       <<: *worker-env
       WORKER_ROLE: serp
     ports: ["127.0.0.1:9102:9100"]
 
+  # Phase 4. Starting this makes eight workers — see the note above.
   linkedin-worker:
     <<: *worker-base
     profiles: ["full"]
@@ -270,11 +296,3 @@ services:
       <<: *worker-env
       WORKER_ROLE: linkedin
     ports: ["127.0.0.1:9104:9100"]
-
-  registry-worker:
-    <<: *worker-base
-    profiles: ["full"]
-    environment:
-      <<: *worker-env
-      WORKER_ROLE: registry
-    ports: ["127.0.0.1:9105:9100"]

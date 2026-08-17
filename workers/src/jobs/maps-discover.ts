@@ -15,6 +15,7 @@ import { MapsSource, parseCsv, type MapsBusiness } from '../sources/maps.js'
 import { resolveLocationScope, checkInScope } from '../lib/geo.js'
 import { resolveNicheFilter, checkNicheTypes } from '../lib/niche-types.js'
 import { extractDomain, isJunkDomain } from '../lib/identity.js'
+import { normaliseName } from '../lib/normalise.js'
 import { expandLocation } from '../lib/locations.js'
 import type { Logger } from '../logger.js'
 
@@ -26,15 +27,10 @@ interface Payload {
   [key: string]: unknown
 }
 
-/** Normalised business name, for dedupe and Phase 3 registry matching. */
-export function normaliseName(name: string): string {
-  return (name ?? '')
-    .toLowerCase()
-    .replace(/[.,''"`]/g, '')
-    .replace(/\b(llc|l\.l\.c|inc|incorporated|corp|corporation|ltd|limited|pllc|pc|pa|co|company|group|the)\b/g, ' ')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-}
+// Moved to lib/normalise.ts in Phase 3 so registry matching uses the identical
+// function — two near-identical normalisers would quietly depress every trigram
+// similarity score. Re-exported here for existing importers.
+export { normaliseName } from '../lib/normalise.js'
 
 export function makeMapsDiscoverTask(deps: TaskDeps): Task {
   const { config, db } = deps

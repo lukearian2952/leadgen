@@ -1,14 +1,17 @@
-# LeadGen v2 — Handoff (Phase 3)
+# LeadGen v2 — Handoff (Phase 4)
 
 State as of 2026-08-17. Written so someone else (or me, later) can pick this up
 without re-deriving anything. `ARCHITECTURE.md` is the design, `MIGRATION.md`
 the v1→v2 plan; this file is *what is actually true right now*.
 
-**One-line status:** Phase 2 is complete and proven end to end. A clean
-100-business campaign ran the full queue and produced a small but real result:
-75 businesses, 18 named, 1 Tier A, for about 68¢. Cost and verification are
-solved. **Names are the wall**, and the pre-Phase-3 audits established precisely
-why — which changes what Phase 3 should build.
+**One-line status:** Phase 3 is built and re-run end to end. Named-rate went
+**24% → 40%** on the same 75 businesses. That **misses the ≥55% bar**, and §11
+gives the measured reason per source. The more important result is that
+**naming is no longer the binding constraint — mailbox construction is.** Tier A
+did not move (1 → 1) while Tier B went 0 → 8.
+
+Phase 2's result (75 businesses, 18 named, 1 Tier A, ~68¢) is kept below as the
+baseline every Phase 3 number is measured against.
 
 **Blocked externally:** outbound TCP/25 is dropped upstream of our NIC. Ticket
 open with Hostinger; evidence in `docs/hostinger-evidence.txt`. Verification
@@ -423,6 +426,221 @@ The two honest levers for the remainder:
 - No Places API calls during the run.
 - The exit-IP guard will hard-fail a scrape whose proxy leaves the US; if it
   fires, swap `DECODO_MAPS_STICKY_PORT` rather than re-configuring the same one.
+
+---
+
+## 11. Phase 3 result — registry + SERP, same 75 businesses
+
+Campaign `0419ce66-259c-4dd0-9023-070cabb09a6b`, "med spa" / "Long Island, NY".
+
+**Method note.** Discovery was *replayed* from campaign `fd23a9e1`'s own rows —
+same place_ids, same businesses, same websites — rather than re-scraped.
+gosom's 30 city queries at depth 10 collapse to ~100 unique places and *which*
+100 varies run to run; a different 75 would move named-rate for reasons
+unrelated to registry or SERP and make the per-source split uninterpretable.
+Everything downstream of discovery was earned again from scratch: no names,
+emails, tiers or verdicts were carried over.
+
+**75/75 crawled, named and enriched. 0 failed jobs, 0 dead-lettered.**
+
+### 11.1 Funnel
+
+| | Phase 2 | Phase 3 |
+|---|---|---|
+| discovered / kept | 100 / 75 | (replayed) 75 |
+| **named** | **18 (24%)** | **30 (40%)** |
+| Tier A | 1 | **1** |
+| Tier B | 0 | **8** |
+| Tier C | 9 | 12 |
+| rejected | 65 | 54 |
+
+### 11.2 Named-rate per source, and the union
+
+Owner-grade names each source was able to supply, over all 75:
+
+| Source | Leads named | % of 75 | Won the row |
+|---|---|---|---|
+| `site_crawl` | 19 | 25.3% | 17 |
+| `registry` | 11 | 14.7% | 11 |
+| `serp` | 2 | 2.7% | 2 |
+| **union** | **30** | **40.0%** | — |
+
+Registry outranks site by design, so it won all 11 of its own and took 2 from
+site. **The site crawl was flat (18 → 19): the entire +16pp is registry (+11)
+and SERP (+2).**
+
+### 11.3 Clinical-lead promotions: zero, and why
+
+**0 of 30 named leads are `clinical_lead`. Every one is `owner_grade`.** The
+machinery aimed at §6.2's 21 title-gate rejections contributed nothing, and
+this was measured twice rather than guessed:
+
+The site crawl proposed 38 clinical_lead candidates across **23 leads**. Of
+those 23, 13 also had an owner-grade name (so the clinical one was never
+needed). The remaining **10 ended `clinical_lead_uncorroborated`**. For those
+10, all three corroboration routes were checked:
+
+| Route | Fired |
+|---|---|
+| `registry_officer` | 0 of 10 — 9 had no registry match at all |
+| `serp_owner` | 0 of 10 — 9 had no SERP candidate at all |
+| `sole_person_ownership` | **0 of 10** |
+
+The third is the interesting one. It needs exactly one person on the site *and*
+first-person ownership language, and **the two halves never co-occurred**:
+
+- 4 leads had exactly one person and no ownership voice (Dr. Debbie's
+  Aesthetics, NY Face Place, Signature Aesthetics by Dr. Carney, Zoyya)
+- 3 leads had ownership voice but 2, 3 and **17** people (Quality Aesthetics,
+  Tatiana Masone, Pod Spa and Wellness)
+
+That is the rule behaving correctly and conservatively, not a defect. A site
+naming 17 people and saying "I founded this practice" identifies nobody.
+
+**The cheapest unused signal is sitting in that table.** `Tatiana Masone, NP
+Aesthetic Injector` — the *business name is the owner's name*, the site has
+ownership voice, and it still went unnamed. Person-name-in-business-name is a
+strong, free corroboration source and is not implemented.
+
+### 11.4 Registry match confidence
+
+24 of 75 businesses matched an entity (32%); 11 of those 24 yielded a
+person-shaped officer (46%).
+
+| Similarity band | Matches | Won the name |
+|---|---|---|
+| 0.60–0.70 | 3 | 2 |
+| 0.70–0.80 | 3 | 2 |
+| 0.80–0.90 | 3 | 0 |
+| 0.90–1.00 | 15 | 7 |
+
+mean 0.903 · min 0.607 · max 1.000
+
+### 11.5 Freemail Tier B
+
+**7 leads admitted**, all `safe`, all published on the business's own site,
+none reaching Tier A. This is the single largest deliverable gain in the phase
+and is why Tier B went 0 → 8. `no_mx` rejections fell **22 → 6**.
+
+| Business | Address | Matched on |
+|---|---|---|
+| Aesthetic Medical Lounge | `aestheticmedicallounge@` | whole business name |
+| Four Seasons Head Spa | `fourseasonsheadspa.ny@` | business token |
+| Karasmatic Day Spa | `karasmaticdayspa@` | business token |
+| Legacy MedSpa | `legacymedspa2@` | `legacy` |
+| Lotus Skin Care Center | `debraquail@` | owner first name |
+| Simplyme Aesthetics + Wellness | `simplymemedspa@` | `simplyme` |
+| Skin by Bobbi | `skinbybobbid@` | `bobbi` |
+
+One row was rejected by the rule as designed
+(`freemail_local_part_unrelated`), which is the guard working.
+
+### 11.6 Cost — 59.3¢ for 75 businesses, $0.0079 each
+
+| Stage | Jobs | Cents | Avg s |
+|---|---|---|---|
+| `crawl:site` | 72 | 28.59 | 6.26 |
+| `enrich:lead` (incl. Verifalia) | 72 | 23.70 | 1.03 |
+| `serp:owner` | 44 | 6.98 | 2.09 |
+| `registry:match` | 72 | 0.00 | 1.03 |
+
+**Verifalia: 21 checks, 23.7¢ of an 800¢ cap (3.0%)** — 9 safe, 6 risky, 6
+invalid. SERP cache: 88 queries stored, 0 hits (first run), 0 empty result sets.
+Registry ingest: 18,614 NY entities for Nassau+Suffolk, 38.8% carrying a
+person-shaped officer, 1,076 ZIP→county pairs learned.
+
+### 11.7 Why the ≥55% bar was missed
+
+**Registry underdelivered against its own forecast**: `ARCHITECTURE.md` §8.5
+predicted 35–45% named from registry; it produced **14.7%**. The estimate
+assumed the measured 49.4% person-shape ceiling would survive matching. It did
+not — matching cost more than half of it, and the two losses compound:
+
+- **32% match rate.** Two causes, both measured against the live API rather
+  than inferred. *DBA/trade names are absent from the dataset*: `CIAO BELLA
+  SKIN + SCALP` (Westbury) has six `CIAO BELLA` entities in Nassau/Suffolk and
+  none of them is the med spa — they are a restaurant, a hair studio, a
+  photographer, a boutique, a food service and an LLC. *Out-of-county
+  registration*: `Brizel Med Spa` in Garden City, Nassau exists in NY DOS only
+  as `BRIZEL BEAUTY SPA INC.` in **Kings**.
+- **46% person-yield on the matches**, exactly the §4B problem — 13 of 24
+  matched entities named only themselves or a commercial agent.
+
+**SERP underdelivered outright: 2.7%.** 44 jobs, 88 queries, **zero empty
+result sets** — SearXNG worked. But only 3 candidate names survived extraction
+and 2 were owner-grade. Med spa SERP results are dominated by directory and
+social listings (Yelp, Instagram, RealSelf) that name no owner, and the two
+guards (the model's `source_url` must be one we supplied; the result must be
+tie-able to this business at this location) correctly reject the rest.
+
+**Site crawl was flat**, which was expected: same crawler, same owner-grade
+rule.
+
+### 11.8 The finding that matters more than the miss
+
+**Tier A did not move: 1 → 1**, on 30 named leads instead of 18.
+
+Naming is no longer the wall. Of the 30 named leads, the mailbox stage lost:
+6 `mailbox_invalid`, 6 `catch_all_low_score`, 5 `no_mx`, 2 `freemail:gmail.com`,
+1 `not_deliverable:risky`. Only one produced a verified, non-catch-all mailbox
+on a domain the business controls.
+
+**Phase 4 should not be more name sources.** The next constraint is turning a
+known name into a deliverable address: pattern inference has almost no training
+data (`domain_patterns` is nearly empty), and catch-all domains still cap
+everything they touch at Tier B.
+
+---
+
+## 12. Phase 3 defects found by measuring, not by debugging
+
+Four, in the pattern §10 describes. All were caught before the run.
+
+1. **Florida officer names are three fixed sub-fields, not "First Last".** The
+   42-char slot is `LAST`(20) + `FIRST`(14) + middle initial. Splitting on
+   whitespace — the obvious reading, and what the published layout document
+   implies — yields `first="Jover", last="Daniella"` for
+   `"JOVER               DANIELLA"`: **a wrong name on every single Florida
+   row.** The 14-char width was established by measuring where the padding run
+   ends across all 1,553 person-typed officers in a real daily file (561 of 586
+   end at exactly offset 14). Asserted in `test/fl-layout.test.ts` against four
+   unmodified records.
+2. **Florida supplies a per-officer P/C flag** the layout document also omits —
+   1,553 persons vs 94 companies on the sample day. The source answers
+   person-vs-company itself, which NY forces us to infer. Now trusted.
+3. **Trigram similarity ≥ 0.6 alone produces confident false matches.**
+   Measured on these exact 75 before the guard existed: `AIREM Aesthetic Spa &
+   Plastic Surgery` → `AESTHETIC PLASTIC SURGERY, P.C.` (0.75), `Haven
+   Aesthetics & Laser` → `LUXE LASER & AESTHETICS INC` (0.63), `Simplyme
+   Aesthetics + Wellness` → `CLA AESTHETICS & WELLNESS LLC` (0.61). Each would
+   have attached **a real person's name to the wrong business** — worse than no
+   name. "aesthetic", "spa", "laser", "wellness" are most of both strings, so
+   similarity was measuring the niche, not the business. Fixed with a
+   distinctive-token requirement, plus a 0.9-similarity-and-matching-ZIP floor
+   for names made entirely of niche words (`Med Spa`, `Laser Spa Studio`).
+4. **The registry top-up was suspected broken and is not.** 39 leads triggered
+   a targeted lookup and 0 matched, which looks like a bug. A direct statewide
+   query confirmed it is correct behaviour: the entities genuinely are not
+   there under those names in those counties (§11.7). A laxer top-up would have
+   matched `CIAO BELLA HAIR STUDIO INC.` and produced a wrong owner.
+
+Two config defects surfaced from worker boot logs:
+
+- **`SOCRATA_APP_TOKEN` is still empty**, on the Mac and on the server. The NY
+  ingest ran on the shared anonymous throttle pool and hit retry backoffs. Free
+  from `evergreen.data.socrata.com/signup`; still the first item in §8.
+- **`DECODO_COUNTRY` / `DECODO_STICKY_PORT_MIN` / `_MAX` were in `.env` but
+  never passed through `docker-compose`**, so every worker logged them missing
+  at boot. Behaviour was correct anyway — `config.ts` defaults country to `us`
+  and the ports to 10001–10100 — but three false "optional config missing"
+  warnings on every start is the noise that hides a real one. Fixed.
+
+**`EMAXCONNSESSION` is real and arrived exactly where §1 predicted.** Seven
+workers hold 14 of ~15 session slots; an ad-hoc session-mode client is the 15th
+and is refused. Operational consequence: **scripts must use `DATABASE_URL`
+(transaction pooler, 6543), not `DATABASE_URL_DIRECT`**, and must enqueue jobs
+via `graphile_worker.add_job` in SQL rather than `makeWorkerUtils`. Both
+`scripts/phase3-rerun.ts` and `scripts/phase3-report.ts` do this.
 
 ---
 
