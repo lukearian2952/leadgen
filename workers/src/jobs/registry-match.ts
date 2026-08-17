@@ -31,7 +31,8 @@ import { adapterFor, upsertEntities, type IngestScope } from '../sources/registr
 import type { RegistryOfficer } from '../sources/registry/types.js'
 import { distinctiveTokens } from '../lib/normalise.js'
 import { longIslandCounty } from '../lib/long-island.js'
-import { putCandidates, applyNameDecision, serpWouldHelp } from './name-store.js'
+import { putCandidates, readNameState, applyNameDecision, serpWouldHelp } from './name-store.js'
+import { adjacentCounties } from '../lib/counties.js'
 import type { NameCandidate } from '../lib/name-decision.js'
 
 interface Payload { campaignId: string; leadId: string; [key: string]: unknown }
@@ -115,10 +116,18 @@ export function makeRegistryMatchTask(deps: TaskDeps): Task {
     }
 
     if (!best) {
-      await putCandidates(db, leadId, 'registry', [])
+      // No forward match is precisely where the reverse direction earns its
+      // keep: the business name is unmatchable (DBA, trade name, wrong county)
+      // but the owner's own name may still be on a filing nearby.
+      const reverse = await reverseLookup(db, leadId, state, county, [])
+      await putCandidates(db, leadId, 'registry', reverse.candidates)
+      if (reverse.address) await saveAddress(db, leadId, reverse.address)
+
       ctx.cost.detail = {
         matched: false, state, county: county || null,
         topped_up: toppedUp, reason: 'no_entity_above_threshold',
+        reverse_checked: reverse.checked,
+        reverse_hits: reverse.candidates.length,
       }
       return finishStage(ctx, db, campaignId, leadId)
     }
@@ -149,22 +158,137 @@ export function makeRegistryMatchTask(deps: TaskDeps): Task {
       },
     }] : []
 
-    await putCandidates(db, leadId, 'registry', candidates)
+    const reverse = await reverseLookup(db, leadId, state, county, candidates)
+    await putCandidates(db, leadId, 'registry', [...candidates, ...reverse.candidates])
+
     await db.query(
       `update leads set registry_entity_id = $2, match_confidence = $3,
                         county = coalesce(nullif(county,''), $4)
         where id = $1`,
       [leadId, best.id, confidence, county])
 
+    if (reverse.address) await saveAddress(db, leadId, reverse.address)
+
     ctx.cost.detail = {
       matched: true, state, county: county || null, topped_up: toppedUp,
       similarity: confidence, entity_name: best.name,
       named: Boolean(officer),
       source_field: officer?.source_field ?? null,
+      reverse_checked: reverse.checked,
+      reverse_hits: reverse.candidates.length,
     }
 
     return finishStage(ctx, db, campaignId, leadId)
   })
+}
+
+interface ReverseResult {
+  /** People from the site we looked up. */
+  checked: number
+  candidates: NameCandidate[]
+  address: { street: string; city: string; zip: string } | null
+}
+
+/**
+ * Reverse lookup: is a person found on this website an officer of any entity
+ * near this business?
+ *
+ * ── Why this is different from the forward match ─────────────────────────────
+ *
+ * The forward match keys on the *business name*, which is where Phase 3 lost
+ * most of its coverage: DBA and trade names are absent from these datasets, so
+ * `CIAO BELLA SKIN + SCALP` matches six unrelated Ciao Bellas and none of them
+ * is the med spa. The reverse direction keys on the *person's name* instead,
+ * which does not suffer from that at all — a business trading as anything can
+ * still have filed under its owner's name.
+ *
+ * It also answers a question the forward match cannot: the site says "Cortney
+ * Kucker, PA" with no ownership claim; if Cortney Kucker is a registered
+ * officer of an entity in this county, that is independent evidence she runs
+ * something here. Under the Phase 3 policy that is exactly what promotes a
+ * `clinical_lead`.
+ *
+ * Every person the crawl named is looked up, whatever their title — the point
+ * is to discover ownership the title did not state.
+ *
+ * The entity's address is captured too: a registered address is a real postal
+ * address for the business, which the Maps listing does not always give.
+ */
+async function reverseLookup(
+  db: TaskDeps['db'], leadId: string, state: string, county: string,
+  forward: readonly NameCandidate[],
+): Promise<ReverseResult> {
+  const empty: ReverseResult = { checked: 0, candidates: [], address: null }
+  if (!state) return empty
+
+  const { candidates: existing } = await readNameState(db, leadId)
+  const people = existing.filter(c => c.source === 'site_crawl' && c.first && c.last)
+  if (!people.length) return empty
+
+  const counties = adjacentCounties(state, county)
+  const out: NameCandidate[] = []
+  let address: ReverseResult['address'] = null
+
+  for (const person of people) {
+    // Already corroborated by the forward match; a second lookup adds nothing.
+    if (forward.some(f => f.first === person.first && f.last === person.last)) continue
+
+    const { rows } = await db.query<{
+      id: string; name: string; county: string
+      street: string; city: string; postal_code: string
+      officers: Array<{ first: string; last: string; title: string; source_field: string }>
+    }>(
+      `select id, name, county, street, city, postal_code, officers
+         from registry_entities
+        where state = $1
+          and ($2::text[] = '{}' or county = any($2))
+          and officers @> $3::jsonb
+        limit 3`,
+      [state, counties, JSON.stringify([{ first: person.first, last: person.last }])])
+
+    if (!rows.length) continue
+    const hit = rows[0]
+    const officer = hit.officers.find(o => o.first === person.first && o.last === person.last)
+
+    out.push({
+      source: 'registry',
+      first: person.first,
+      last: person.last,
+      title: officer?.title ?? 'Officer',
+      nameClass: 'owner_grade',
+      confidence: 1,
+      detail: {
+        reverse: true,
+        registry_state: state,
+        entity_name: hit.name,
+        entity_id: hit.id,
+        entity_county: hit.county,
+        source_field: officer?.source_field ?? null,
+        counties_searched: counties,
+        other_entities: rows.length - 1,
+      },
+    })
+
+    if (!address && hit.street) {
+      address = { street: hit.street, city: hit.city, zip: hit.postal_code }
+    }
+  }
+
+  return { checked: people.length, candidates: out, address }
+}
+
+async function saveAddress(
+  db: TaskDeps['db'], leadId: string,
+  address: { street: string; city: string; zip: string },
+): Promise<void> {
+  await db.query(
+    `update leads
+        set postal_street = coalesce(nullif(postal_street,''), $2),
+            postal_city   = coalesce(nullif(postal_city,''),   $3),
+            postal_zip    = coalesce(nullif(postal_zip,''),    $4),
+            address_source = coalesce(nullif(address_source,''), 'registry_reverse')
+      where id = $1`,
+    [leadId, address.street, address.city, address.zip])
 }
 
 /**

@@ -644,6 +644,152 @@ via `graphile_worker.add_job` in SQL rather than `makeWorkerUtils`. Both
 
 ---
 
+## 13. Phase 4a result — mailbox conversion, same 75 businesses
+
+Campaign `4900719f-5203-4922-b443-9d3c5fae2759`. Same replay method as §11.
+**75/75 crawled, named and enriched. 0 failed jobs, 0 dead-lettered.**
+
+### 13.1 Funnel
+
+| | Phase 2 | Phase 3 | **Phase 4a** |
+|---|---|---|---|
+| **named** | 18 (24%) | 30 (40%) | **32 (42.7%)** |
+| **Tier A** | 1 | 1 | **1** |
+| Tier B | 0 | 8 | **10** |
+| Tier C | 9 | 12 | 12 |
+| rejected | 65 | 54 | 52 |
+
+**Tier A did not move again.** The phase was scoped to fix mailbox conversion
+and it did not fix it.
+
+### 13.2 Tier B by reason
+
+| Reason | Leads |
+|---|---|
+| `freemail_business_verified` | 7 |
+| `catch_all_named` (new) | **1** |
+| `catch_all_scored:70` | 1 |
+| `catch_all_scored:60` | 1 |
+
+### 13.3 Pattern discovery recovered zero mailboxes — because there is nothing to discover
+
+`mailbox_invalid` among named leads went **6 → 8**, not down. `domain_patterns`
+gained **no** row from discovery; its only two rows are `verified_send`.
+
+The mechanism is not broken — it has 22 unit tests and they pass. The raw
+material does not exist in this niche. A census of every address the crawl saw
+across all 75 businesses:
+
+| | n |
+|---|---|
+| addresses seen | 140 |
+| **on the business's own domain** | **17** |
+| freemail | 29 |
+| on-domain **and** personal (could teach a pattern) | **1** |
+
+The single one is `marisa@radiancebodylab.info`, and its site named no person to
+pair it with, so even that taught nothing. Everything else on-domain is
+`info@`, `hello@`, `booking@`. **Med spa sites publish a role inbox and a
+booking form, not staff addresses.**
+
+The same scarcity gates the other new rule: `catch_all_named` requires the
+domain to publish *any* mailbox, and with 17 on-domain addresses across 75
+businesses it fired **once**.
+
+### 13.4 The candidate ladder cost 2.6× and returned nothing
+
+| | Phase 3 | Phase 4a |
+|---|---|---|
+| avg candidates per lead | 4.06 | **10.78** |
+| Verifalia checks | 79 | **205** |
+| `enrich:lead` spend | 23.7¢ | **61.5¢** |
+| `mailbox_invalid` (named leads) | 6 | 8 |
+
+Among leads named in *both* runs `mailbox_invalid` is unchanged — the two extra
+failures are the two newly-named leads. **The four extra shapes recovered zero
+mailboxes and nearly tripled verification spend.** Recommend reverting
+`EXTRA_PATTERN_ORDER` from the default ladder; it is a measured loss.
+
+### 13.5 The registry reverse lookup is the one thing that worked
+
+**5 hits / 64 people checked = 7.8%.** Four named the winning row, and two of
+those reached entity names the forward match could never have found:
+
+| Business | Person | Registry entity | Tier |
+|---|---|---|---|
+| BEAUTIOLOGY | Marchelle Charles | `MARCHELLE CHARLES BEAUTY, LLC` | **A** |
+| Simplyme Aesthetics + Wellness | Wiliana Lopez | `SIMPLYME MEDSPA, LLC` | B |
+| The Skin Speakeasy | Gina Rose | **`UNBOUNDED BEAUTY LLC`** | B |
+| Woodbury Medical Spa | Harris Hausen | **`SPINEAMERICARE MEDICAL, P.C.`** | C |
+
+`UNBOUNDED BEAUTY LLC` shares no token with "The Skin Speakeasy". This is
+precisely the DBA problem §11.7 identified, and keying on the *person* rather
+than the business name solves it. **The run's only Tier A came from here.**
+
+5 leads also gained a registered postal address (`address_source =
+registry_reverse`).
+
+**A reporting defect nearly buried this.** Corroboration was computed only from
+*other* sources agreeing, so when a reverse hit won the row on registry
+precedence its own list came back empty — the report said "leads named by
+reverse lookup: **0**" while the reverse lookup was responsible for the only
+Tier A. The feature worked; the number describing it did not. Fixed in
+`name-decision.ts` with two tests, and it is worth remembering that this run's
+headline number was almost wrong in the *pessimistic* direction.
+
+### 13.6 name_in_business_name
+
+**2 promotions, 1 genuinely new name** — `Tatiana Masone, NP Aesthetic Injector`,
+the exact lead §11.3 flagged as the cheapest unused signal, now Tier B via the
+freemail path. The other (Skin by Bobbi) was already owner-grade, so the
+corroboration was redundant.
+
+### 13.7 Net change P3 → P4a
+
+**+3 named**: Dr. Debbie's Aesthetics, Signature Aesthetics by Dr. Carney (both
+Deborah Carney, both `mailbox_invalid`), Tatiana Masone (Tier B).
+
+**−1 lost**: Lotus Skin Care Center, named "Debra" from the site in Phase 3 and
+unnamed here. Not investigated; most likely crawl variance on a single lead.
+Flagged rather than explained.
+
+### 13.8 Cost and spend
+
+96.8¢ for 75 businesses = **$0.0129 each** (was $0.0079). Still inside the
+≤$0.02 target, and the whole increase is the ladder. **Verifalia 61.5¢ of the
+800¢ cap (7.7%)**, 205 checks. SERP cache: 109 queries, **83 hits** — the cache
+is now paying for itself.
+
+### 13.9 Registry ingest status — the token never landed
+
+**`SOCRATA_APP_TOKEN` is still empty**, in the Mac `.env` and in
+`/opt/leadgen/.env` (line 48 in both, `SOCRATA_APP_TOKEN=` with no value), and
+the container confirms it. The ingest was re-run anonymously and produced
+**18,614 seen / 18,614 written / 7,216 with a person — identical to Phase 3**,
+so the missing token costs throughput and retry backoff, not coverage.
+
+### 13.10 Where the wall actually is
+
+Three phases have now failed to move Tier A off 1. Of 32 named leads: 8
+`mailbox_invalid`, 6 `no_mx`, 3 `catch_all_low_score`, 2 `freemail:gmail.com`,
+1 risky. The evidence across Phase 3 and 4a says the constraint is **not**
+guessing strategy — a longer ladder and a discovery step both returned nothing.
+
+What the data actually shows is that these businesses **do not have
+owner-addressable mailboxes on their own domains**. They run on booking
+platforms and consumer mail. The remaining honest levers are ranked by evidence,
+not preference:
+
+1. **Accept that Tier B is the product for this niche.** 10 of 75 are mailable
+   with a named owner and a labelled caveat. That is the real yield.
+2. **Reverse registry lookup is under-exploited** — 7.8% hit rate on a naive
+   exact-name match, no fuzzy matching, no adjacent-state search, and it
+   already produced the only Tier A.
+3. **A different niche.** Med spas were chosen as the benchmark and are close
+   to the worst case for owner mailboxes.
+
+---
+
 ## 9. Commit history
 
 | Commit | What |

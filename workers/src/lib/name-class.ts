@@ -178,13 +178,66 @@ export function classifyPerson(fullName: string, title: string): NameClass {
  * policy. Anything else keeps it at Tier C.
  */
 export type Corroboration =
-  | 'registry_officer'        // a state filing names them as an officer
-  | 'serp_owner'              // a SERP result calls them owner/founder
-  | 'sole_person_ownership'   // only person on the site, and it speaks in first person
+  | 'registry_officer'          // a state filing names them as an officer
+  | 'registry_officer_reverse'  // they are an officer of some entity in this county
+  | 'serp_owner'                // a SERP result calls them owner/founder
+  | 'sole_person_ownership'     // only person on the site, and it speaks in first person
+  | 'name_in_business_name'     // the business is named after them
 
 export const CORROBORATIONS: Corroboration[] = [
-  'registry_officer', 'serp_owner', 'sole_person_ownership',
+  'registry_officer', 'registry_officer_reverse', 'serp_owner',
+  'sole_person_ownership', 'name_in_business_name',
 ]
+
+// ── Name in the business name ────────────────────────────────────────────────
+
+const ASCII_TOKENS = (s: string): string[] =>
+  (s ?? '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean)
+
+/**
+ * Is the business named after this person?
+ *
+ * Phase 3 left `Tatiana Masone, NP Aesthetic Injector` unnamed. The business
+ * name *is* the owner's name, the site used first-person ownership language,
+ * and none of the three corroboration routes fired. That is the cheapest signal
+ * available and it was going unused.
+ *
+ * Two shapes, with deliberately different bars:
+ *
+ *   * **Both names present** — "Bobbi Balzo" in "Skin by Bobbi Balzo". Decisive
+ *     on its own. Two matching tokens is not a coincidence.
+ *
+ *   * **First name only** — "Tatiana" in "Tatiana Loves Tox", "Debbie" in
+ *     "Dr. Debbie's Aesthetics". A first name alone is weak: "Sage Beauty Bar"
+ *     is not run by anyone called Sage, and an esthetician called Bella at
+ *     "Ciao Bella" would be promoted on a pun. So it requires a *second*
+ *     signal — ownership voice on the site — before it counts.
+ *
+ * The last name alone is deliberately not enough either. "Sunflower Spa" run by
+ * a Ms. Sunflower is possible; a staff member called Ms. Sunflower is likelier.
+ */
+export function nameInBusinessName(
+  first: string, last: string, businessName: string, ownershipVoice: boolean,
+): boolean {
+  const tokens = new Set(ASCII_TOKENS(businessName))
+  if (!tokens.size) return false
+
+  const f = ASCII_TOKENS(first)[0] ?? ''
+  const l = ASCII_TOKENS(last)[0] ?? ''
+  // Two characters is not a name token worth matching on.
+  const hasFirst = f.length >= 3 && tokens.has(f)
+  const hasLast = l.length >= 3 && tokens.has(l)
+
+  if (hasFirst && hasLast) return true
+  if (hasFirst && ownershipVoice) return true
+  return false
+}
 
 export function promotesToOwner(corroboration: readonly string[]): boolean {
   return corroboration.some(c => (CORROBORATIONS as readonly string[]).includes(c))

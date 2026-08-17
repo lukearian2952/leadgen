@@ -22,7 +22,9 @@
 // beat an owner_grade name from the site, because it is not a candidate at all.
 // Precedence ranks the survivors, it does not admit anyone.
 
-import { promotesToOwner, type NameClass, type Corroboration } from './name-class.js'
+import {
+  promotesToOwner, nameInBusinessName, type NameClass, type Corroboration,
+} from './name-class.js'
 
 export type NameSource = 'registry' | 'site_crawl' | 'serp'
 
@@ -84,6 +86,8 @@ export interface SiteSignals {
   peopleNamedOnSite: number
   /** Did the site speak with an owner's voice? */
   ownershipVoice: boolean
+  /** The business's own name, for the name-in-business-name rule. */
+  businessName?: string
 }
 
 /**
@@ -104,7 +108,12 @@ export function corroborationsFor(
     if (other.source === candidate.source) continue
     if (!samePerson(candidate, other)) continue
 
-    if (other.source === 'registry') found.add('registry_officer')
+    if (other.source === 'registry') {
+      // A forward match found this business's own filing; a reverse match found
+      // this *person* as an officer somewhere in the county. Both corroborate,
+      // and they are reported separately because their hit rates differ.
+      found.add(other.detail?.reverse ? 'registry_officer_reverse' : 'registry_officer')
+    }
     // A SERP hit only corroborates ownership if it actually said "owner" or
     // "founder". A SERP result that merely repeats the clinical title adds no
     // information the site did not already have.
@@ -116,6 +125,30 @@ export function corroborationsFor(
   // mentioned.
   if (candidate.source === 'site_crawl' && site.peopleNamedOnSite === 1 && site.ownershipVoice) {
     found.add('sole_person_ownership')
+  }
+
+  // Named-after-the-owner. Unlike the sole-person test this applies to a
+  // candidate from any source: if the registry names an officer called Masone
+  // and the business is "Masone Aesthetics", that is the same evidence
+  // regardless of which source surfaced the person.
+  if (site.businessName &&
+      nameInBusinessName(candidate.first, candidate.last, site.businessName, site.ownershipVoice)) {
+    found.add('name_in_business_name')
+  }
+
+  // A reverse registry hit is evidence about the candidate *itself*, not
+  // agreement between two sources, so it has to be recorded here rather than
+  // in the cross-source loop above.
+  //
+  // This was a real reporting hole. Registry outranks site, so when a reverse
+  // hit names someone the site also names, the registry candidate wins — and
+  // the loop above only records corroboration coming *from* other sources.
+  // The winner's list came back empty and the Phase 4 report showed
+  // "leads named by reverse lookup: 0" while the reverse lookup was in fact
+  // responsible for the run's only Tier A. The feature worked; the number
+  // describing it did not.
+  if (candidate.source === 'registry' && candidate.detail?.reverse) {
+    found.add('registry_officer_reverse')
   }
 
   return [...found]

@@ -19,14 +19,16 @@ export interface StoredNameState {
 }
 
 export async function readNameState(db: Pool, leadId: string): Promise<StoredNameState> {
-  const { rows } = await db.query<{ evidence: Record<string, unknown> | null }>(
-    `select evidence from leads where id = $1`, [leadId])
+  const { rows } = await db.query<{ evidence: Record<string, unknown> | null; business_name: string }>(
+    `select evidence, business_name from leads where id = $1`, [leadId])
   const evidence = rows[0]?.evidence ?? {}
   return {
     candidates: (evidence.name_candidates as NameCandidate[] | undefined) ?? [],
     site: {
       peopleNamedOnSite: Number(evidence.site_people_count ?? 0),
       ownershipVoice: Boolean(evidence.site_ownership_voice),
+      // The name-in-business-name rule needs it, and it is on the row already.
+      businessName: rows[0]?.business_name ?? '',
     },
   }
 }

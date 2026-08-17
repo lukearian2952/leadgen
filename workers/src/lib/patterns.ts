@@ -10,11 +10,35 @@ import { extractDomain } from './identity.js'
 
 export type PatternName =
   | 'first' | 'first.last' | 'flast' | 'firstl' | 'f.last' | 'first_last' | 'last'
+  // Phase 4 extras. Tried only after the standard six, because they are
+  // genuinely rarer — but 6 of 30 named Phase 3 leads died on
+  // `mailbox_invalid`, which means the right shape was outside the six.
+  | 'lastfirst' | 'first_l' | 'firstlast' | 'f_last'
 
 /** Ordered by how common they are for small owner-operated businesses. */
 export const PATTERN_ORDER: PatternName[] = [
   'first.last', 'first', 'flast', 'firstl', 'f.last', 'first_last', 'last',
 ]
+
+/** The Phase 4 extras, appended after PATTERN_ORDER when guessing. */
+export const EXTRA_PATTERN_ORDER: PatternName[] = [
+  'firstlast', 'lastfirst', 'first_l', 'f_last',
+]
+
+/** Everything, in the order candidates are generated. */
+export const ALL_PATTERN_ORDER: PatternName[] = [...PATTERN_ORDER, ...EXTRA_PATTERN_ORDER]
+
+/**
+ * Shapes accepted for the `catch_all_named` Tier-B rule when the domain has no
+ * learned pattern.
+ *
+ * A catch-all domain accepts everything, so the address cannot be confirmed by
+ * probing it — the only protection is that the *shape* is one a human would
+ * actually be given. `first@` and `first.last@` are the two that a small
+ * business hands its owner; `flast@` and the rest are corporate conventions
+ * that a two-person med spa does not have.
+ */
+export const CATCH_ALL_SAFE_PATTERNS: PatternName[] = ['first', 'first.last']
 
 const ASCII = (s: string) =>
   (s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z]/gi, '').toLowerCase()
@@ -37,6 +61,10 @@ export function renderPattern(
     case 'f.last':      return `${f[0]}.${l}@${domain}`
     case 'first_last':  return `${f}_${l}@${domain}`
     case 'last':        return `${l}@${domain}`
+    case 'firstlast':   return `${f}${l}@${domain}`
+    case 'lastfirst':   return `${l}${f}@${domain}`
+    case 'first_l':     return `${f}_${l[0]}@${domain}`
+    case 'f_last':      return `${f[0]}_${l}@${domain}`
   }
 }
 
@@ -52,7 +80,7 @@ export function inferPattern(email: string, first: string, last: string): Patter
   const domain = (email.split('@')[1] ?? '').toLowerCase()
   if (!local || !domain) return null
 
-  for (const pattern of PATTERN_ORDER) {
+  for (const pattern of ALL_PATTERN_ORDER) {
     const rendered = renderPattern(pattern, first, last, domain)
     if (rendered && rendered.split('@')[0] === local) return pattern
   }
@@ -85,6 +113,54 @@ export function candidatesFor(
     if (out.length >= max) break
   }
   return out
+}
+
+/**
+ * The Phase 4 ladder: learned pattern, then the standard six, then the four
+ * extras.
+ *
+ * Ordered, not scored, because verification stops at the first `safe`. Putting
+ * the learned pattern first is what makes a domain with a known convention cost
+ * one probe instead of ten; putting the extras last is what stops a rare shape
+ * being tried before a common one on a domain we know nothing about.
+ *
+ * The extras exist because 6 of Phase 3's 30 named leads ended
+ * `mailbox_invalid` — every candidate rejected — which means the real address
+ * was a shape the six did not cover.
+ */
+export function candidateLadder(
+  first: string, last: string, domain: string,
+  knownPattern?: PatternName | null,
+): string[] {
+  if (!first || !domain) return []
+
+  const out: string[] = []
+  const push = (pattern: PatternName) => {
+    const rendered = renderPattern(pattern, first, last, domain)
+    if (rendered && !out.includes(rendered)) out.push(rendered)
+  }
+
+  if (knownPattern) push(knownPattern)
+  for (const pattern of PATTERN_ORDER) push(pattern)
+  for (const pattern of EXTRA_PATTERN_ORDER) push(pattern)
+  return out
+}
+
+/**
+ * Does this address follow a shape acceptable on a catch-all domain?
+ *
+ * Used by the `catch_all_named` rule. Either it matches the pattern the domain
+ * is known to use, or it is one of the two shapes a small business actually
+ * hands its owner. Anything else on a catch-all domain is a guess that will
+ * verify `safe` whether or not the mailbox exists.
+ */
+export function followsAcceptedShape(
+  email: string, first: string, last: string, knownPattern?: PatternName | null,
+): { ok: boolean; pattern: PatternName | null } {
+  const pattern = inferPattern(email, first, last)
+  if (!pattern) return { ok: false, pattern: null }
+  if (knownPattern && pattern === knownPattern) return { ok: true, pattern }
+  return { ok: CATCH_ALL_SAFE_PATTERNS.includes(pattern), pattern }
 }
 
 /** A local part that cannot exist, for catch-all detection. */

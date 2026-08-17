@@ -38,6 +38,14 @@ import { normaliseName } from './normalise.js'
 /** Label written to `tier_reason` when this path admits a row. */
 export const FREEMAIL_TIER_REASON = 'freemail_business_verified'
 
+/**
+ * Label for the other Phase 4 Tier-B concession: an owner-grade name on a
+ * catch-all domain that demonstrably receives mail, at an address shaped the
+ * way that domain shapes addresses. Kept next to the freemail label so the two
+ * exported buckets are defined in one place.
+ */
+export const CATCH_ALL_TIER_REASON = 'catch_all_named'
+
 const ASCII = (s: string) =>
   (s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z]/gi, '').toLowerCase()
 

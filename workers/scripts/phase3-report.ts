@@ -165,6 +165,75 @@ table(await q(`
          count(*) filter (where jsonb_array_length(results) = 0) empty_results
     from serp_cache`))
 
+// ── Phase 4: Tier B broken out by reason ─────────────────────────────────────
+head('TIER B BY REASON (the two Phase 4 concessions)')
+table(await q(`
+  select tier,
+         coalesce(nullif(tier_reason,''),'(none)') tier_reason,
+         count(*) leads
+    from leads where campaign_id = $1 and tier in ('A','B')
+   group by 1,2 order by 1, 3 desc`, [C]))
+
+head('MAILBOX RECOVERY — pattern discovery')
+table(await q(`
+  select source, count(*) domains, count(*) filter (where catch_all) catch_all
+    from domain_patterns
+   where source <> '' group by 1 order by 2 desc`))
+table(await q(`
+  select count(*) filter (where evidence->'pattern_used' is not null
+                            and evidence->>'pattern_used' <> 'null') used_a_pattern,
+         count(*) filter (where tier in ('A','B')) converted,
+         count(*) filter (where reject_reason = 'mailbox_invalid') still_invalid
+    from leads where campaign_id = $1 and owner_first_name <> ''`, [C]))
+
+head('MAILBOX_INVALID: Phase 4 vs Phase 3, among named leads')
+table(await q(`
+  select case when campaign_id = $1 then 'phase4' else 'phase3' end run,
+         count(*) filter (where owner_first_name <> '') named,
+         count(*) filter (where reject_reason = 'mailbox_invalid') mailbox_invalid,
+         count(*) filter (where reject_reason like 'catch_all_low_score%') catch_all_lost,
+         count(*) filter (where tier = 'A') tier_a,
+         count(*) filter (where tier = 'B') tier_b
+    from leads where campaign_id in ($1,$2) group by 1 order by 1 desc`,
+  [C, process.argv[4] ?? '0419ce66-259c-4dd0-9023-070cabb09a6b']))
+
+head('REGISTRY REVERSE LOOKUP — hit rate')
+table(await q(`
+  select count(*) filter (where (detail->>'reverse_checked')::int > 0) leads_with_people,
+         sum((detail->>'reverse_checked')::int) people_checked,
+         sum((detail->>'reverse_hits')::int) hits,
+         round(100.0 * sum((detail->>'reverse_hits')::int)
+               / nullif(sum((detail->>'reverse_checked')::int),0), 1) hit_rate_pct
+    from job_runs
+   where campaign_id = $1 and stage = 'registry:match' and status = 'success'`, [C]))
+table(await q(`
+  select count(*) leads_named_by_reverse
+    from leads l
+   where l.campaign_id = $1
+     and 'registry_officer_reverse' = any(l.corroboration)`, [C]))
+table(await q(`
+  select count(*) leads_with_registry_address
+    from leads where campaign_id = $1 and address_source = 'registry_reverse'`, [C]))
+
+head('NAME_IN_BUSINESS_NAME PROMOTIONS')
+table(await q(`
+  select count(*) filter (where 'name_in_business_name' = any(corroboration)) promotions,
+         count(*) filter (where 'name_in_business_name' = any(corroboration)
+                            and name_class = 'clinical_lead') clinical_promoted
+    from leads where campaign_id = $1 and owner_first_name <> ''`, [C]))
+table(await q(`
+  select business_name, owner_first_name||' '||owner_last_name person,
+         name_class, array_to_string(corroboration,',') corroboration, tier
+    from leads
+   where campaign_id = $1 and 'name_in_business_name' = any(corroboration)
+   order by business_name`, [C]))
+
+head('ALL CORROBORATIONS FIRED')
+table(await q(`
+  select unnest(corroboration) corroboration, count(*) leads
+    from leads where campaign_id = $1 and owner_first_name <> ''
+   group by 1 order by 2 desc`, [C]))
+
 // ── the named leads themselves ───────────────────────────────────────────────
 head('EVERY NAMED LEAD')
 table(await q(`

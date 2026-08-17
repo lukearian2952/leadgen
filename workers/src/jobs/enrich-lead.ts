@@ -10,18 +10,27 @@
 // and Verifalia only sees unknown/risky verdicts on high-trust names.
 
 import type { Task } from 'graphile-worker'
-import { wrapTask } from './wrap.js'
+import { wrapTask, type JobContext } from './wrap.js'
 import type { TaskDeps } from './index.js'
 import { buildVerifier } from './verify-batch.js'
 import type { Candidate } from '../verify/hybrid.js'
 import { assignTier, scoreCandidate, type VerifyResult } from '../verify/types.js'
-import { candidatesFor, foldPattern, inferPattern, type PatternName, type PatternRecord } from '../lib/patterns.js'
+import {
+  candidateLadder, followsAcceptedShape, foldPattern, inferPattern,
+  type PatternName, type PatternRecord,
+} from '../lib/patterns.js'
+import {
+  discoverPattern, domainHasPublishedMailbox, addressQuery, addressesFromText,
+  type DiscoveryResult, type PatternSource,
+} from '../lib/pattern-discovery.js'
+import { SerpSource } from '../sources/serp.js'
+import type { NameCandidate } from '../lib/name-decision.js'
 import {
   extractDomain, isJunkDomain, isFreemail, freemailAllowed,
   isGenericLocalPart, checkFirstName, emailDomain, isValidEmail,
 } from '../lib/identity.js'
 import {
-  freemailBusinessVerified, FREEMAIL_TIER_REASON,
+  freemailBusinessVerified, FREEMAIL_TIER_REASON, CATCH_ALL_TIER_REASON,
 } from '../lib/freemail.js'
 import { hasMx } from '../lib/dns.js'
 
@@ -172,8 +181,29 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
 
     if (!hasName) return finish('rejected', nameReason!)
 
-    // ── candidates ────────────────────────────────────────────────────────────
-    const known = await loadPattern(db, domain)
+    // ── pattern discovery ─────────────────────────────────────────────────────
+    //
+    // Learn the domain's convention *before* guessing at it. Phase 3 only ever
+    // learned a pattern from a successful verified send, which is circular —
+    // a domain had to convert before it could teach anything, so
+    // `domain_patterns` stayed nearly empty and every lead paid for six
+    // guesses. A single personal address already printed on the site collapses
+    // that to one.
+    const stored = await loadPattern(db, domain)
+    const discovery = await discoverDomainPattern(
+      db, config, ctx, campaignId, leadId, lead, domain)
+
+    // A stored pattern from a verified send outranks a freshly inferred one:
+    // it was confirmed by a mailbox actually existing, not by a string match.
+    const known: PatternRecord | null =
+      stored?.source === 'verified_send' ? stored
+      : discovery.discovered
+        ? { domain, pattern: discovery.discovered.pattern, confidence: 0.7, samples: 1 }
+        : stored
+
+    if (discovery.discovered && stored?.source !== 'verified_send') {
+      await saveDiscoveredPattern(db, domain, discovery)
+    }
 
     // An address the site itself published beats any generated guess.
     const { rows: existing } = await db.query<{ email: string }>(
@@ -181,8 +211,13 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
       [campaignId, leadId])
     const siteEmail = existing[0]?.email ?? ''
 
-    const generated = candidatesFor(
-      lead.owner_first_name, lead.owner_last_name, domain, known?.pattern, 6)
+    // Learned pattern first, then the standard six, then the four extras. The
+    // extras exist because 6 of Phase 3's 30 named leads ended
+    // `mailbox_invalid` — every candidate rejected — which means the real
+    // shape was outside the six. Verification still stops at the first `safe`,
+    // so a longer ladder costs nothing on a domain that converts early.
+    const generated = candidateLadder(
+      lead.owner_first_name, lead.owner_last_name, domain, known?.pattern)
 
     const toCheck = [...new Set([siteEmail, ...generated].filter(Boolean))]
       .filter(e => !isGenericLocalPart(e))
@@ -262,23 +297,55 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
       score,
     })
 
-    // The freemail path is capped at Tier B by policy, never Tier A. A
-    // published consumer mailbox verifying `safe` would otherwise land in the
-    // main CSV, and the whole point of the concession is that it does not.
-    const tier = freemailTierB ? (naturalTier === 'rejected' ? 'rejected' : 'B') : naturalTier
+    // ── catch_all_named ───────────────────────────────────────────────────────
+    //
+    // Phase 3 lost 6 of 30 named leads to `catch_all_low_score`. The score gate
+    // was the wrong instrument: a catch-all domain accepts every address, so no
+    // amount of probing distinguishes a real mailbox from a guess, and the
+    // score was standing in for evidence it never had.
+    //
+    // Two pieces of real evidence replace it, and both must hold:
+    //
+    //   1. **The domain demonstrably receives mail** — it publishes an address
+    //      on itself, on its own site or its Google listing. A role inbox
+    //      counts: `info@theclinic.com` on the contact page is the business
+    //      saying mail sent here reaches us. That is what separates a working
+    //      catch-all from a parked domain, and it is better evidence than an
+    //      SMTP handshake that would have succeeded either way.
+    //   2. **The address is a shape a human would have been given** — the
+    //      domain's learned pattern, or `first@` / `first.last@`. A rare
+    //      corporate shape guessed onto a catch-all is manufactured confidence.
+    //
+    // The score is still computed and recorded, it just no longer gates. The
+    // result is Tier B with a distinct label so the sender can segment it away
+    // from the freemail bucket.
+    const shape = followsAcceptedShape(
+      chosen.email, lead.owner_first_name, lead.owner_last_name, known?.pattern)
+    const domainReceivesMail = domainHasPublishedMailbox(discovery)
+    const catchAllNamed = isCatchAll && !freemailTierB &&
+      chosen.status !== 'invalid' && domainReceivesMail && shape.ok
+
+    // Both concessions cap at Tier B, never Tier A. Neither has proof that this
+    // specific mailbox exists — only that it is the right shape on a domain
+    // that reads its mail.
+    const tier = naturalTier === 'rejected' ? 'rejected'
+      : freemailTierB ? 'B'
+      : catchAllNamed ? 'B'
+      : naturalTier
 
     // The reason has to be derived from the same `isCatchAll` the tier used.
     // Testing `chosen.is_catch_all` alone produced `not_deliverable:safe` — a
     // deliverable address on a domain-level catch-all, correctly held out of
     // Tier A but labelled as though the mailbox had failed.
     const rejectReason = tier === 'A' ? ''
-      : freemailTierB ? ''
+      : freemailTierB || catchAllNamed ? ''
       : tier === 'B' ? `catch_all_scored:${score}`
       : chosen.status === 'invalid' ? 'mailbox_invalid'
       : isCatchAll ? `catch_all_low_score:${score}`
       : `not_deliverable:${chosen.status}`
 
     const tierReason = freemailTierB ? FREEMAIL_TIER_REASON
+      : catchAllNamed ? CATCH_ALL_TIER_REASON
       : tier === 'B' ? `catch_all_scored:${score}`
       : ''
 
@@ -389,16 +456,109 @@ async function writeContact(
      JSON.stringify(evidence)])
 }
 
-async function loadPattern(db: TaskDeps['db'], domain: string): Promise<PatternRecord | null> {
-  const { rows } = await db.query<{ domain: string; pattern: string; confidence: string; samples: number }>(
-    `select domain, pattern, confidence, samples from domain_patterns where domain = $1`, [domain])
+/** Stored pattern, plus how it was learned — a verified send outranks inference. */
+type StoredPattern = PatternRecord & { source: string }
+
+async function loadPattern(db: TaskDeps['db'], domain: string): Promise<StoredPattern | null> {
+  const { rows } = await db.query<{
+    domain: string; pattern: string; confidence: string; samples: number; source: string
+  }>(
+    `select domain, pattern, confidence, samples, source
+       from domain_patterns where domain = $1`, [domain])
   if (!rows[0]) return null
   return {
     domain: rows[0].domain,
     pattern: rows[0].pattern as PatternName,
     confidence: Number(rows[0].confidence),
     samples: rows[0].samples,
+    source: rows[0].source ?? '',
   }
+}
+
+/**
+ * Everything this domain has published, and what convention it implies.
+ *
+ * Four sources, in cost order. The first three are already paid for — the
+ * crawl ran, the mailto links were scraped, the Google listing came with the
+ * Maps row. Only the SERP query costs anything, and it runs only when the free
+ * sources found no personal address, since that is the only case where it can
+ * change the answer.
+ */
+async function discoverDomainPattern(
+  db: TaskDeps['db'], config: TaskDeps['config'], ctx: JobContext,
+  campaignId: string, leadId: string, lead: LeadRow, domain: string,
+): Promise<DiscoveryResult> {
+  const addresses: Array<{ email: string; source: PatternSource }> = []
+  const add = (list: unknown, source: PatternSource) => {
+    for (const e of (list as string[] | undefined) ?? []) {
+      if (typeof e === 'string') addresses.push({ email: e, source })
+    }
+  }
+
+  add(lead.evidence?.crawl_emails, 'site_crawl')
+  add(lead.evidence?.maps_emails, 'gbp')
+  if (lead.email) addresses.push({ email: lead.email, source: 'mailto' })
+
+  const { rows: contactRows } = await db.query<{ email: string }>(
+    `select email from contacts where campaign_id = $1 and lead_id = $2 and email <> ''`,
+    [campaignId, leadId])
+  for (const r of contactRows) addresses.push({ email: r.email, source: 'site_crawl' })
+
+  // Everyone the crawl named, whatever their title. A receptionist's address
+  // teaches the domain's convention exactly as well as the owner's.
+  const people = ((lead.evidence?.name_candidates as NameCandidate[] | undefined) ?? [])
+    .filter(c => c.first)
+    .map(c => ({ first: c.first, last: c.last }))
+
+  let result = discoverPattern({ domain, addresses, people })
+
+  // One SERP query, only when the free sources came up empty and there is
+  // someone to attribute an address to.
+  if (!result.discovered && people.length && config.searxngUrl) {
+    try {
+      const serp = new SerpSource(config.searxngUrl, db, ctx.logger)
+      const { results, cached } = await serp.search(addressQuery(domain), 8)
+      const found = new Set<string>()
+      for (const r of results) {
+        for (const e of addressesFromText(`${r.title} ${r.content} ${r.url}`, domain)) found.add(e)
+      }
+      if (found.size) {
+        for (const email of found) addresses.push({ email, source: 'serp' })
+        result = discoverPattern({ domain, addresses, people })
+      }
+      ctx.cost.detail = { ...ctx.cost.detail, address_serp_cached: cached, address_serp_found: found.size }
+    } catch (err) {
+      // A SERP outage must not fail the lead — it just means no extra address.
+      ctx.logger.warn('address discovery serp failed', { domain, err: (err as Error).message })
+    }
+  }
+
+  return result
+}
+
+/**
+ * Record an inferred pattern.
+ *
+ * Confidence 0.7, below the 0.85+ a repeatedly-confirmed send earns: this was
+ * read off a string that matched a name, which is good evidence and not proof.
+ * `source` keeps the two distinguishable so a verified send can always
+ * overrule.
+ */
+async function saveDiscoveredPattern(
+  db: TaskDeps['db'], domain: string, discovery: DiscoveryResult,
+): Promise<void> {
+  const d = discovery.discovered
+  if (!d) return
+  await db.query(
+    `insert into domain_patterns
+       (domain, pattern, confidence, samples, learned_from, source, discovered_addresses, updated_at)
+     values ($1,$2,0.7,1,$3,$4,$5,now())
+     on conflict (domain) do update
+       set pattern = excluded.pattern, confidence = excluded.confidence,
+           learned_from = excluded.learned_from, source = excluded.source,
+           discovered_addresses = excluded.discovered_addresses, updated_at = now()
+     where domain_patterns.source <> 'verified_send'`,
+    [domain, d.pattern, d.learnedFrom, d.source, discovery.onDomainAddresses])
 }
 
 async function savePattern(
@@ -407,12 +567,18 @@ async function savePattern(
 ) {
   const folded = foldPattern(existing, email, first, last)
   if (!folded) return
+  // `source = 'verified_send'` is what makes this outrank an inferred pattern
+  // on the next lead for this domain. Without it `loadPattern` would never see
+  // a verified source and pattern discovery would overwrite a confirmed shape
+  // with an inferred one on every run.
   await db.query(
-    `insert into domain_patterns (domain, pattern, confidence, samples, learned_from, updated_at)
-     values ($1,$2,$3,$4,$5,now())
+    `insert into domain_patterns
+       (domain, pattern, confidence, samples, learned_from, source, updated_at)
+     values ($1,$2,$3,$4,$5,'verified_send',now())
      on conflict (domain) do update
        set pattern = excluded.pattern, confidence = excluded.confidence,
-           samples = excluded.samples, updated_at = now()`,
+           samples = excluded.samples, learned_from = excluded.learned_from,
+           source = 'verified_send', updated_at = now()`,
     [folded.domain, folded.pattern, folded.confidence, folded.samples, email])
 }
 

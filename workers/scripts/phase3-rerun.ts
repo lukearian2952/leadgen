@@ -22,7 +22,7 @@
 import pg from 'pg'
 
 const SOURCE = 'fd23a9e1-a5d9-4dd7-91a1-babcc0179e96'
-const MARKER = 'phase3-rerun'
+const MARKER = process.env.RUN_LABEL ?? 'phase3-rerun'
 
 // Transaction pooler (6543), not the session pooler. Seven workers hold 14 of
 // the ~15 session-mode slots project-wide, so a session-mode client here is the
@@ -101,6 +101,7 @@ async function seed(): Promise<string> {
 
 async function ingest(): Promise<void> {
   {
+    await db.query(`delete from graphile_worker.jobs where key = $1`, [jobKey('registry:ingest','global')]).catch(() => {})
     await addJob('registry:ingest', {
       state: 'NY',
       counties: ['Nassau', 'Suffolk'],
