@@ -65,10 +65,24 @@ const BLOCKED_SUFFIXES = [
   'ggpht.com', 'googleusercontent.com', 'lh3.google.com',
   // Fonts and static media.
   'fonts.gstatic.com', 'fonts.googleapis.com',
+  // www.gstatic.com is Google's shared static bundle — 37 MB of the 154 MB a
+  // 95-business batch spent after everything else was blocked. It is listed
+  // here only because blocking it was TESTED against row yield: gosom parses
+  // the rendered DOM, so if Maps needed this bundle the batch would come back
+  // empty and the block would be reverted. See METER_BLOCK_GSTATIC.
+  ...((process.env.METER_BLOCK_GSTATIC ?? 'true') !== 'false'
+    ? ['www.gstatic.com'] : []),
   // Analytics, ads and telemetry — pure overhead for a scraper.
   'google-analytics.com', 'analytics.google.com', 'googletagmanager.com',
   'doubleclick.net', 'googlesyndication.com', 'googleadservices.com',
-  'play.google.com', 'youtube.com', 'ytimg.com', 'gstatic.com/images',
+  'play.google.com', 'youtube.com', 'ytimg.com',
+  // Site-builder and social asset CDNs. These appear because gosom's `-email`
+  // flag crawls each business's own website; measured at 24 MB across one
+  // 117-business batch, none of it text we read.
+  'static.parastorage.com', 'parastorage.com', 'wixapps.net', 'wixstatic.com',
+  'assets.squarespace.com', 'squarespace-cdn.com',
+  'fbcdn.net', 'cdninstagram.com', 'adobe.io', 'typekit.net',
+  'cloudfront.net/fonts', 'use.fontawesome.com', 'cdnjs.cloudflare.com',
 ]
 
 function isBlocked(host) {

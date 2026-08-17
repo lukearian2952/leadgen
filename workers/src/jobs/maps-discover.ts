@@ -140,7 +140,11 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
     // discarded half-written.
     const jobId = existingJobId ?? await source.startJob(
       `${campaignId.slice(0, 8)}-maps`, queries, proxies,
-      { depth: mapsDepth(), maxSeconds: Math.round(mapsWaitMs(queries.length) / 1000) + 300 },
+      {
+        depth: mapsDepth(),
+        maxSeconds: Math.round(mapsWaitMs(queries.length) / 1000) + 300,
+        email: mapsEmailEnabled(),
+      },
     )
     if (existingJobId) {
       ctx.logger.info('adopting an already-completed scraper job', { jobId })
@@ -249,7 +253,33 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
          b.latitude, b.longitude, b.rating, b.reviewCount,
          JSON.stringify({ maps_link: b.link, address: b.address })],
       ).catch(async () => {
-        // No domain: the partial unique index does not apply, so insert plainly.
+        // No domain, so `businesses_domain_uniq` does not apply — but
+        // `businesses_name_phone_uniq` does, and a plain insert here aborted the
+        // whole discovery batch the first time two domain-less businesses shared
+        // a name and phone. That is not rare: chains list the same head-office
+        // number against several branches.
+        //
+        // The ON CONFLICT predicate has to repeat the partial index's WHERE
+        // clause exactly, or Postgres cannot match it to the index.
+        const conflict = await db.query<{ id: string }>(
+          `insert into businesses
+             (domain, name, name_norm, phone, website, street, city, state, postal_code,
+              country, category, place_id, latitude, longitude, rating, review_count,
+              sources, evidence)
+           values (null,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+                   array['google_maps'], $16)
+           on conflict (name_norm, phone)
+             where (domain is null or domain = '') and phone <> ''
+             do update set last_seen_at = now()
+           returning id`,
+          [b.name, normaliseName(b.name), b.phone, b.website, b.street, b.city, b.state,
+           b.postalCode, b.country, b.category, b.placeId, b.latitude, b.longitude,
+           b.rating, b.reviewCount, JSON.stringify({ maps_link: b.link })],
+        ).catch(() => ({ rows: [] as Array<{ id: string }> }))
+
+        // No phone either: no unique index covers this row, so a plain insert
+        // is safe and a duplicate is acceptable — there is nothing to key on.
+        if (conflict.rows.length) return conflict
         return db.query<{ id: string }>(
           `insert into businesses
              (domain, name, name_norm, phone, website, street, city, state, postal_code,
@@ -580,4 +610,21 @@ async function readMeter(logger: Pick<Logger, 'warn'>): Promise<MeterReading | n
     logger.warn('could not read proxy meter', { err: (err as Error).message })
     return null
   }
+}
+
+/**
+ * Whether to let gosom crawl each business's website for email addresses.
+ *
+ * **Off by default.** Measured on a 117-business batch, this flag pulled ~40 MB
+ * of *residential* traffic fetching business homepages and their site-builder
+ * assets — and it is duplicate work: `crawl:site` already visits every one of
+ * those sites, datacenter-first, extracts the same addresses, and reads the
+ * page text for owner names besides. The only thing lost is `maps_emails`,
+ * which fed the published-address set that `crawl_emails` also feeds.
+ *
+ * Residential bytes are the dominant variable cost in this fleet; paying them
+ * to duplicate a datacenter fetch is the worst trade available.
+ */
+export function mapsEmailEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.MAPS_SCRAPER_EMAIL ?? '').trim().toLowerCase() === 'true'
 }

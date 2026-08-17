@@ -58,6 +58,7 @@ export class MapsSource {
   async startJob(
     jobName: string, queries: string[], proxies: string[], opts: {
       lang?: string; zoom?: number; depth?: number; maxSeconds?: number
+      email?: boolean
     } = {},
   ): Promise<string> {
     const body = {
@@ -68,7 +69,7 @@ export class MapsSource {
       depth: opts.depth ?? 10,
       // The API takes nanoseconds.
       max_time: (opts.maxSeconds ?? 900) * 1_000_000_000,
-      email: true,
+      email: opts.email ?? false,
       proxies: proxies.length ? proxies : null,
     }
 
