@@ -116,20 +116,18 @@ services:
     mem_limit: 2g
     memswap_limit: 2g
     shm_size: 1gb
-    depends_on:
-      - decodo-proxy
     environment:
-      # Through the auth-forwarding hop, for the same reason Playwright needs it:
-      # crawl4ai drives Chromium, and Chromium does not accept credentials in a
-      # --proxy-server URL. The old direct-credential form here would have failed
-      # the same way the scraper's did.
+      # crawl4ai takes the credentials as separate fields, which is the form it
+      # supports; it does its own auth handling for the browser. Country
+      # targeting uses Decodo's `user-<name>-country-<cc>` form, without which
+      # the pool hands out random global exits.
       #
-      # Note this container is currently INERT: no job calls crawl4ai. The crawl
-      # stage fetches directly and escalates through ProxyPool (undici), which
-      # handles proxy credentials natively — the auth problem is Chromium's
-      # alone. This is wired correctly for the day crawl4ai is used for
-      # JS-rendered pages, not a fix to today's crawl path.
-      PROXY_SERVER: http://decodo-proxy:8080
+      # This container is currently INERT — no job calls crawl4ai. The crawl
+      # stage fetches directly and escalates through ProxyPool on undici, which
+      # handles proxy credentials natively.
+      PROXY_SERVER: http://${DECODO_HOST}:${DECODO_PORT}
+      PROXY_USERNAME: user-${DECODO_USERNAME}-country-${DECODO_COUNTRY:-us}
+      PROXY_PASSWORD: ${DECODO_PASSWORD}
     ports:
       - "127.0.0.1:11235:11235"
     healthcheck:
@@ -149,33 +147,32 @@ services:
     command: ["npx", "-y", "playwright@1.49.0", "run-server", "--port", "3300", "--host", "0.0.0.0"]
     expose: ["3300"]
 
-  # ── Decodo auth-forwarding proxy ────────────────────────────────────────────
+  # ── Decodo auth-forwarding proxy (retained, currently unused) ───────────────
   #
-  # Chromium does not accept credentials embedded in a --proxy-server URL. The
-  # scraper's Playwright logged 498 ERR_PROXY_AUTH_UNSUPPORTED / "Upstream proxy
-  # rejected CONNECT: 522" trying exactly that, so Maps discovery never egressed
-  # residential at all.
+  # Built on the assumption that Chromium's inability to take credentials in a
+  # --proxy-server URL was what broke Maps discovery. It is not: gosom runs its
+  # own internal AuthProxy for exactly that purpose and *requires* credentials in
+  # the URL it is given. Pointing it here produced
+  #   "failed to start auth proxy for http://decodo-proxy:8080:
+  #    username and password are required"
+  # and no scrape at all.
   #
-  # gost listens without auth on the internal network and forwards upstream with
-  # the credentials attached, giving Chromium a proxy it can actually use. It is
-  # bound to the compose network only — an open forward proxy reachable from the
-  # internet would be an abuse vector wearing our residential subscription.
+  # Kept because it is correct and tested for any Chromium-driving component that
+  # does NOT do its own auth — the standalone playwright service under the `full`
+  # profile is the likely candidate. Nothing points at it today. Verified working:
+  # exits US, sticky within a session.
   decodo-proxy:
+    profiles: ["full"]
     image: ginuerzh/gost:2.11.5
     restart: unless-stopped
     mem_limit: 128m
     memswap_limit: 128m
     expose: ["8080"]
-    # Two things encoded in this one line, both load-bearing:
-    #
-    # `user-<name>-country-<cc>` is Decodo's geo-targeting form. Passing the bare
-    # username gets a random global exit — first test of this container came out
-    # of Córdoba, Argentina, which for a "med spa in Garden City NY" scrape would
-    # have returned Argentine results that looked perfectly valid.
-    #
-    # A sticky port keeps one exit IP for the whole scrape: Google localises by
-    # exit IP, and an address that changes mid-job silently mixes result sets
-    # from different cities.
+    # `user-<name>-country-<cc>` is Decodo's geo-targeting form; the bare
+    # username yields a random global exit (first test came out of Córdoba,
+    # Argentina). A sticky port holds one exit for a whole session — and holds it
+    # past a country change, so a port with a live foreign session must be
+    # swapped rather than reconfigured.
     command: >
       -L=http://:8080
       -F=http://user-${DECODO_USERNAME}-country-${DECODO_COUNTRY:-us}:${DECODO_PASSWORD}@${DECODO_HOST}:${DECODO_MAPS_STICKY_PORT:-10042}
@@ -192,8 +189,6 @@ services:
     mem_limit: 512m
     memswap_limit: 512m
     command: ["-web", "-addr", ":8080", "-c", "2"]
-    depends_on:
-      - decodo-proxy
     ports:
       - "127.0.0.1:8085:8080"
 
@@ -225,7 +220,6 @@ services:
     environment:
       <<: *worker-env
       WORKER_ROLE: maps
-      MAPS_PROXY_URL: http://decodo-proxy:8080
       MAPS_PROXY_REQUIRE_COUNTRY: ${DECODO_COUNTRY:-us}
     ports: ["127.0.0.1:9101:9100"]
 
