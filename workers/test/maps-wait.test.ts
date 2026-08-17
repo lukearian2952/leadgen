@@ -1,3 +1,4 @@
+import { mapsWaitMs } from '../src/jobs/maps-discover.js'
 // gosom reports a job `ok` while it is still scraping, and `/download` returns
 // zero bytes at that moment. The old wait trusted the status, downloaded
 // nothing, and reported `returned: 0` for a run that had actually found the
@@ -71,5 +72,33 @@ describe('maps job polling', () => {
     const { source } = scripted([{ status: 'working', body: '' }])
     const result = await source.waitFor('job-5', 30, 1)
     expect(result.status).toBe('timeout')
+  })
+})
+
+describe('mapsWaitMs — the cap that dead-lettered a good scrape', () => {
+  it('keeps the brief\'s 20 minutes for a Long Island-sized run', () => {
+    // 30 cities x 30s = 15 min, floored to the original 20.
+    expect(mapsWaitMs(30, {})).toBe(20 * 60_000)
+  })
+
+  it('scales past 20 minutes for a statewide run', () => {
+    // 48 cities was still `working` at the 20-minute cap and dead-lettered on
+    // its final attempt with a healthy scrape running underneath it.
+    expect(mapsWaitMs(48, {})).toBe(24 * 60_000)
+    expect(mapsWaitMs(48, {})).toBeGreaterThan(20 * 60_000)
+  })
+
+  it('ceilings at 45 minutes', () => {
+    expect(mapsWaitMs(500, {})).toBe(45 * 60_000)
+  })
+
+  it('lets MAPS_WAIT_MINUTES override, including past the ceiling', () => {
+    expect(mapsWaitMs(30, { MAPS_WAIT_MINUTES: '5' })).toBe(5 * 60_000)
+    expect(mapsWaitMs(30, { MAPS_WAIT_MINUTES: '90' })).toBe(90 * 60_000)
+  })
+
+  it('ignores a non-numeric or non-positive override', () => {
+    expect(mapsWaitMs(30, { MAPS_WAIT_MINUTES: 'soon' })).toBe(20 * 60_000)
+    expect(mapsWaitMs(30, { MAPS_WAIT_MINUTES: '0' })).toBe(20 * 60_000)
   })
 })

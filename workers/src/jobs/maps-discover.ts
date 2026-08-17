@@ -61,14 +61,30 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
     await assertProxyExit(proxies[0], ctx.logger)
 
     const queries = cities.map(city => `${niche} in ${city}`)
+    // maxSeconds is deliberately above our own wait cap: if one of the two has
+    // to give up first it should be us, so the scraper's own result is never
+    // discarded half-written.
     const jobId = await source.startJob(
       `${campaignId.slice(0, 8)}-maps`, queries, proxies,
-      { depth: 10, maxSeconds: 1500 },
+      { depth: 10, maxSeconds: Math.round(mapsWaitMs(queries.length) / 1000) + 300 },
     )
 
-    // 20 minute cap, per the brief. The wait now requires a non-empty download,
-    // so `ok` here genuinely means there is something to parse.
-    const wait = await source.waitFor(jobId, 20 * 60_000)
+    // ── how long to wait ──────────────────────────────────────────────────────
+    //
+    // The brief's cap was 20 minutes, chosen against a 30-city Long Island
+    // scrape. A 48-city statewide scrape does not fit: "vehicle wrap shop" /
+    // "New York" was still `working` at the cap and the job dead-lettered on
+    // its final attempt with a perfectly good scrape running underneath it.
+    //
+    // The cap now scales with the number of queries — 30 s each, floored at the
+    // original 20 minutes and ceilinged at 45 — and `MAPS_WAIT_MINUTES`
+    // overrides it outright. gosom is started with `maxSeconds` above this, so
+    // the scraper is never the thing that gives up first.
+    const waitMs = mapsWaitMs(queries.length)
+    ctx.logger.info('waiting for maps job', {
+      jobId, queries: queries.length, waitMinutes: Math.round(waitMs / 60_000),
+    })
+    const wait = await source.waitFor(jobId, waitMs)
     if (wait.status !== 'ok') {
       throw new Error(
         wait.status === 'ok_but_empty'
@@ -207,6 +223,26 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
     await ctx.helpers.addJob('campaign:reconcile', { campaignId },
       { jobKey: jobKey('campaign:reconcile', campaignId), runAt: new Date(Date.now() + 60_000) })
   })
+}
+
+/** Floor, ceiling and per-query allowance for the discovery wait. */
+export const MAPS_WAIT_MIN_MS = 20 * 60_000
+export const MAPS_WAIT_MAX_MS = 45 * 60_000
+export const MAPS_WAIT_PER_QUERY_MS = 30_000
+
+/**
+ * How long to wait for a scrape of `queryCount` cities.
+ *
+ * `MAPS_WAIT_MINUTES` overrides everything — including the ceiling — because an
+ * operator setting it explicitly knows more than this heuristic does.
+ */
+export function mapsWaitMs(
+  queryCount: number, env: NodeJS.ProcessEnv = process.env,
+): number {
+  const override = Number(env.MAPS_WAIT_MINUTES ?? '')
+  if (Number.isFinite(override) && override > 0) return override * 60_000
+  const scaled = queryCount * MAPS_WAIT_PER_QUERY_MS
+  return Math.min(MAPS_WAIT_MAX_MS, Math.max(MAPS_WAIT_MIN_MS, scaled))
 }
 
 /** Proxy URLs handed to the scraper subprocess, which cannot use ProxyPool. */
