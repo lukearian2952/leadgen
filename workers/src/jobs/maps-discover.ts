@@ -16,6 +16,7 @@ import { resolveLocationScope, checkInScope } from '../lib/geo.js'
 import { resolveNicheFilter, checkNicheTypes } from '../lib/niche-types.js'
 import { extractDomain, isJunkDomain } from '../lib/identity.js'
 import { expandLocation } from '../lib/locations.js'
+import type { Logger } from '../logger.js'
 
 interface Payload {
   campaignId: string
@@ -55,6 +56,13 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
     // Maps always goes residential: Google localises by exit IP, so a
     // datacenter request returns a different result set even when not blocked.
     const proxies = residentialProxyUrls(config)
+
+    // Prove the exit IP before spending a scrape on it. Google localises by exit
+    // IP, so an out-of-country exit returns plausible-looking results for the
+    // wrong place — the failure mode is silent, which is why this is a hard
+    // check and not a log line. First run of the auth-forwarding proxy came out
+    // of Córdoba, Argentina while claiming US targeting.
+    await assertProxyExit(proxies[0], ctx.logger)
 
     const queries = cities.map(city => `${niche} in ${city}`)
     const jobId = await source.startJob(
@@ -206,11 +214,94 @@ export function makeMapsDiscoverTask(deps: TaskDeps): Task {
 }
 
 /** Proxy URLs handed to the scraper subprocess, which cannot use ProxyPool. */
+/**
+ * Proxy URLs for the scraper.
+ *
+ * Chromium — which is what gosom drives — does not accept credentials embedded
+ * in a `--proxy-server` URL. Handing it `http://user:pass@host:port` produced
+ * 498 ERR_PROXY_AUTH_UNSUPPORTED and "Upstream proxy rejected CONNECT: 522",
+ * so Maps discovery never egressed residential at all.
+ *
+ * MAPS_PROXY_URL points at the local auth-forwarding hop (the `decodo-proxy`
+ * container), which is credential-free from Chromium's side and attaches the
+ * Decodo credentials upstream. The direct URLs remain the fallback for when
+ * that container is not running, so this degrades to the old behaviour rather
+ * than to no proxy at all.
+ */
 function residentialProxyUrls(config: TaskDeps['config']): string[] {
+  const forwarder = (process.env.MAPS_PROXY_URL ?? '').trim()
+  if (forwarder) return [forwarder]
+
   const { username, password, host, country, rotatingPort, stickyPortMin } = config.decodo
   if (!username || !password || !host) return []
   const user = country ? `user-${username}-country-${country}` : username
   // A handful of distinct exits so one blocked IP does not stall the scrape.
   const ports = [rotatingPort, stickyPortMin, stickyPortMin + 1, stickyPortMin + 2]
   return ports.map(p => `http://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${p}`)
+}
+
+/**
+ * Verify and log the proxy's exit IP before a scrape starts.
+ *
+ * Throws when the exit is outside the required country. That is deliberately
+ * fatal: a scrape through the wrong geography does not fail, it succeeds with
+ * the wrong data, and a campaign of Argentine med spas labelled "Long Island,
+ * NY" is worse than no campaign at all.
+ *
+ * A lookup that cannot run at all is only a warning — failing the whole job
+ * because an IP-geolocation service is down would trade a silent-data problem
+ * for a loud-availability one.
+ */
+export async function assertProxyExit(
+  proxyUrl: string | undefined,
+  logger: Pick<Logger, 'info' | 'warn'>,
+): Promise<void> {
+  const required = (process.env.MAPS_PROXY_REQUIRE_COUNTRY ?? '').trim().toUpperCase()
+  if (!proxyUrl) {
+    logger.warn('maps scrape has no proxy configured — egressing from the server IP')
+    return
+  }
+
+  let info: { ip?: string; city?: string; region?: string; country?: string; org?: string }
+  try {
+    const { ProxyAgent } = await import('undici')
+    const res = await fetchThroughProxy(proxyUrl, ProxyAgent)
+    info = res
+  } catch (err) {
+    logger.warn('could not confirm proxy exit IP — proceeding unverified', {
+      error: (err as Error).message,
+    })
+    return
+  }
+
+  logger.info('maps proxy exit IP', {
+    ip: info.ip, city: info.city, region: info.region,
+    country: info.country, org: info.org,
+  })
+
+  if (required && (info.country ?? '').toUpperCase() !== required) {
+    throw new Error(
+      `maps proxy exit is ${info.country ?? 'unknown'} (${info.ip ?? '?'}, ` +
+      `${info.city ?? '?'}) but ${required} is required. Google localises by exit IP, ` +
+      'so this scrape would return results for the wrong country. A sticky port ' +
+      'holds its session until the TTL expires — switch DECODO_MAPS_STICKY_PORT ' +
+      'to a port without a live session.')
+  }
+}
+
+async function fetchThroughProxy(
+  proxyUrl: string, ProxyAgent: typeof import('undici').ProxyAgent,
+): Promise<Record<string, string>> {
+  const agent = new ProxyAgent(proxyUrl)
+  try {
+    const { fetch: undiciFetch } = await import('undici')
+    const res = await undiciFetch('https://ipinfo.io/json', {
+      dispatcher: agent,
+      signal: AbortSignal.timeout(20_000),
+    })
+    if (!res.ok) throw new Error(`ipinfo HTTP ${res.status}`)
+    return await res.json() as Record<string, string>
+  } finally {
+    await agent.close().catch(() => {})
+  }
 }

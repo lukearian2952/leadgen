@@ -139,6 +139,42 @@ services:
     command: ["npx", "-y", "playwright@1.49.0", "run-server", "--port", "3300", "--host", "0.0.0.0"]
     expose: ["3300"]
 
+  # ── Decodo auth-forwarding proxy ────────────────────────────────────────────
+  #
+  # Chromium does not accept credentials embedded in a --proxy-server URL. The
+  # scraper's Playwright logged 498 ERR_PROXY_AUTH_UNSUPPORTED / "Upstream proxy
+  # rejected CONNECT: 522" trying exactly that, so Maps discovery never egressed
+  # residential at all.
+  #
+  # gost listens without auth on the internal network and forwards upstream with
+  # the credentials attached, giving Chromium a proxy it can actually use. It is
+  # bound to the compose network only — an open forward proxy reachable from the
+  # internet would be an abuse vector wearing our residential subscription.
+  decodo-proxy:
+    image: ginuerzh/gost:2.11.5
+    restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 128m
+    expose: ["8080"]
+    # Two things encoded in this one line, both load-bearing:
+    #
+    # `user-<name>-country-<cc>` is Decodo's geo-targeting form. Passing the bare
+    # username gets a random global exit — first test of this container came out
+    # of Córdoba, Argentina, which for a "med spa in Garden City NY" scrape would
+    # have returned Argentine results that looked perfectly valid.
+    #
+    # A sticky port keeps one exit IP for the whole scrape: Google localises by
+    # exit IP, and an address that changes mid-job silently mixes result sets
+    # from different cities.
+    command: >
+      -L=http://:8080
+      -F=http://user-${DECODO_USERNAME}-country-${DECODO_COUNTRY:-us}:${DECODO_PASSWORD}@${DECODO_HOST}:${DECODO_MAPS_STICKY_PORT:-10042}
+    healthcheck:
+      test: ["CMD", "/bin/sh", "-c", "netstat -ltn | grep -q ':8080'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   # ── Google Maps ─────────────────────────────────────────────────────────────
   maps-scraper:
     image: gosom/google-maps-scraper:latest
@@ -146,6 +182,8 @@ services:
     mem_limit: 512m
     memswap_limit: 512m
     command: ["-web", "-addr", ":8080", "-c", "2"]
+    depends_on:
+      - decodo-proxy
     ports:
       - "127.0.0.1:8085:8080"
 
@@ -177,6 +215,8 @@ services:
     environment:
       <<: *worker-env
       WORKER_ROLE: maps
+      MAPS_PROXY_URL: http://decodo-proxy:8080
+      MAPS_PROXY_REQUIRE_COUNTRY: ${DECODO_COUNTRY:-us}
     ports: ["127.0.0.1:9101:9100"]
 
   crawl-worker:
