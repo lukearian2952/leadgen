@@ -33,6 +33,10 @@ if (!campaignId || !outCsv) throw new Error('usage: byte-drift.ts <campaignId> <
 const HEADER = 'ts,batch,returned,kept,residential_mb,mb_per_discovered,mb_per_kept,over,consecutive\n'
 await writeFile(outCsv, HEADER, 'utf8')
 
+// Deliberately NOT pre-seeded: on restart the guard replays every batch that
+// has already finished, so a CSV written after a crash is complete rather than
+// starting mid-run. Consecutive-over counting replays with it, which is what
+// makes a restart safe rather than a blind spot.
 const seen = new Set<string>()
 let consecutive = 0
 
@@ -97,10 +101,22 @@ for (;;) {
     }
   }
 
-  const { rows: [c] } = await db.query<{ status: string }>(
-    `select status from campaigns where id = $1`, [campaignId])
-  if (c && c.status !== 'running') {
-    console.log(`campaign status ${c.status} — drift guard exiting`)
+  // Exit only when the campaign is BOTH non-running and has no discovery left
+  // queued. Status alone is not enough: reconcile briefly marked this campaign
+  // `completed_low_yield` between batches while discovery carried on, and the
+  // guard took that at face value and exited — leaving the next two batches
+  // completely unmonitored. A watchdog that trusts a single field is not a
+  // watchdog.
+  const { rows: [c] } = await db.query<{ status: string; dq: string }>(
+    `select c.status,
+            (select count(*)::text
+               from graphile_worker._private_jobs j
+               join graphile_worker._private_tasks tk on tk.id = j.task_id
+              where tk.identifier = 'maps:discover'
+                and j.payload->>'campaignId' = c.id::text) dq
+       from campaigns c where c.id = $1`, [campaignId])
+  if (c && c.status !== 'running' && Number(c.dq) === 0) {
+    console.log(`campaign ${c.status} and no discovery queued — drift guard exiting`)
     break
   }
   await new Promise(r => setTimeout(r, 60_000))

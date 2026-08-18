@@ -107,11 +107,16 @@ export function makeReconcileTask(deps: TaskDeps): Task {
       // returning, so a queued or locked discovery job for this campaign means
       // more leads are coming. Checked here rather than via a flag on the
       // campaign so no new column has to be kept in sync by two writers.
+      //
+      // `_private_jobs`, not the public `graphile_worker.jobs` view: the view
+      // exposes task_identifier and locks but NOT payload, so filtering by
+      // campaign is only possible on the private table.
       const { rows: [discovery] } = await db.query<{ n: string }>(
         `select count(*)::text n
-           from graphile_worker.jobs
-          where task_identifier = 'maps:discover'
-            and payload->>'campaignId' = $1`, [campaignId])
+           from graphile_worker._private_jobs j
+           join graphile_worker._private_tasks t on t.id = j.task_id
+          where t.identifier = 'maps:discover'
+            and j.payload->>'campaignId' = $1`, [campaignId])
 
       if (Number(discovery?.n ?? 0) > 0) {
         ctx.logger.info('discovery still in flight — not finalising', {
