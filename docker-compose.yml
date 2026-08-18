@@ -135,6 +135,11 @@ services:
       DECODO_COUNTRY: ${DECODO_COUNTRY:-us}
       # Set false to measure the unoptimised baseline.
       METER_BLOCKING: ${METER_BLOCKING:-true}
+      # www.gstatic.com carries the JS bundle Google Maps needs to render, and
+      # gosom reads the rendered DOM. Blocking it saved 37 MB of 154 and
+      # returned ZERO businesses — tested, not assumed. Left off; the flag
+      # exists so the experiment is repeatable, not because it should be on.
+      METER_BLOCK_GSTATIC: ${METER_BLOCK_GSTATIC:-false}
       METER_BUDGET_BYTES: ${METER_BUDGET_BYTES:-0}
     ports:
       - "127.0.0.1:8090:8090"

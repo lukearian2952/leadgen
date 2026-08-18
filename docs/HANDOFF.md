@@ -914,6 +914,42 @@ The 8 → 182 improvement is items 2 and 3 together.
 
 ---
 
+## 15. Open follow-ups — deferred byte optimisations
+
+Both deferred by decision after the Decodo limit was raised; 1.62 MB/business
+accepted as the working figure. Logged here so they are not silently lost.
+
+### 15.1 `www.gstatic.com` — unproven in both directions
+
+37 MB of the 154 MB a 95-business batch spent, i.e. **24% of the remaining
+cost**, and the largest single lever left.
+
+**My earlier claim that blocking it returns zero businesses is retracted.** It
+rested on one run, and that run coincided with Decodo's traffic limit being
+exhausted — every request was failing with `407 ... reached your current
+traffic limit` regardless of the block. A re-test with the block *disabled*
+failed identically, which is what exposed the confound.
+
+To settle it: two runs with the flag on and two with it off, on a live
+upstream, comparing **row yield** and not only bytes. `METER_BLOCK_GSTATIC`
+exists for exactly this. The plausible mechanism is real — gosom parses the
+rendered DOM and www.gstatic.com carries Google's shared JS bundle — but
+plausible is not measured.
+
+### 15.2 Scroll depth 10 → 5 — never measured
+
+`MAPS_DEPTH` defaults to 5 in compose, but **every byte figure quoted so far
+was taken at depth 10**, including the accepted 1.62. Three attempts to measure
+depth 5 all ran against the exhausted quota.
+
+Depth cuts rows and bytes together, so it is not obviously a win on the
+*ratio* — the question is whether later scroll pages cost the same per page
+while yielding fewer new businesses, which is likely but unmeasured. Until it
+is measured, runs should use depth 10 so their cost matches the accepted
+figure rather than an untested one.
+
+---
+
 ## 9. Commit history
 
 | Commit | What |
