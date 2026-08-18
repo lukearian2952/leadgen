@@ -94,6 +94,35 @@ export function makeReconcileTask(deps: TaskDeps): Task {
         continue
       }
 
+      // ── is discovery still running? ───────────────────────────────────────
+      //
+      // Multi-batch discovery broke the old assumption that an empty per-lead
+      // queue means the campaign is done. On the 1,000-business national run
+      // reconcile fired in the gap between batch 0's leads finishing enrichment
+      // and batch 1's leads existing, saw nothing outstanding, and marked a
+      // campaign `completed_low_yield` at 115 of 1,000 while discovery carried
+      // on behind it.
+      //
+      // The queue is the authority: maps:discover enqueues its successor before
+      // returning, so a queued or locked discovery job for this campaign means
+      // more leads are coming. Checked here rather than via a flag on the
+      // campaign so no new column has to be kept in sync by two writers.
+      const { rows: [discovery] } = await db.query<{ n: string }>(
+        `select count(*)::text n
+           from graphile_worker.jobs
+          where task_identifier = 'maps:discover'
+            and payload->>'campaignId' = $1`, [campaignId])
+
+      if (Number(discovery?.n ?? 0) > 0) {
+        ctx.logger.info('discovery still in flight — not finalising', {
+          campaignId, total, discoveryJobs: Number(discovery.n),
+        })
+        await ctx.helpers.addJob('campaign:reconcile', { campaignId },
+          { jobKey: jobKey('campaign:reconcile', campaignId),
+            runAt: new Date(Date.now() + 120_000) })
+        continue
+      }
+
       // ── finished ──────────────────────────────────────────────────────────
       const tierA = Number(counts.tier_a)
       const tierB = Number(counts.tier_b)
