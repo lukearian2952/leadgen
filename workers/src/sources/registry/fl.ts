@@ -151,15 +151,32 @@ export class FlRegistry implements RegistryAdapter {
 
       let yielded = 0
       for (const member of await listZipMembers(archive)) {
+        // Per-member counts, because the archive is the one place a layout
+        // assumption can be wrong for only *part* of the data. A member whose
+        // records are a different shape shows up here as a collapsed
+        // named-rate or a spike in unreadable dates, rather than as four
+        // million rows of plausible garbage. See `isoFilingDate`.
+        const seen = { records: 0, short: 0, matched: 0, named: 0, badDate: 0 }
+
         // `unzip -p` writes one member to stdout, so the expanded text — several
         // GB across all ten members — never lands on disk.
         for await (const line of unzipLines(archive, member)) {
-          if (line.length < RECORD_LENGTH) continue
+          if (line.length < RECORD_LENGTH) { seen.short++; continue }
+          seen.records++
           const entity = parseRecord(line)
+          if (!entity.filingDate) seen.badDate++
           if (!matchesScope(entity, scope)) continue
+          seen.matched++
+          if (entity.officers.length) seen.named++
           yield entity
           if (scope.limit && ++yielded >= scope.limit) return
         }
+
+        this.logger.info('fl quarterly member', {
+          member, ...seen,
+          named_rate: seen.matched ? Number((seen.named / seen.matched).toFixed(3)) : 0,
+          bad_date_rate: seen.records ? Number((seen.badDate / seen.records).toFixed(4)) : 0,
+        })
       }
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => {})
@@ -266,7 +283,7 @@ export function parseRecord(line: string): RegistryEntity {
 
   officers.sort((a, b) => a.rank - b.rank)
 
-  const filed = F(line, 473, 8)   // yyyymmdd
+  const filed = F(line, 473, 8)   // mmddyyyy — see isoFilingDate
   return {
     state: 'FL',
     entityId: F(line, 1, 12),
@@ -281,12 +298,58 @@ export function parseRecord(line: string): RegistryEntity {
     stateCode: F(line, 333, 2) || 'FL',
     postalCode: F(line, 335, 10),
     street: F(line, 221, 42),
-    filingDate: /^\d{8}$/.test(filed)
-      ? `${filed.slice(0, 4)}-${filed.slice(4, 6)}-${filed.slice(6, 8)}`
-      : null,
+    filingDate: isoFilingDate(filed),
     officers,
     raw: { filing_type: F(line, 206, 15), fei: F(line, 481, 14) },
   }
+}
+
+/**
+ * Florida's 8-digit date fields are **mmddyyyy**, not yyyymmdd.
+ *
+ * ── How that was established, after reading it backwards ─────────────────────
+ *
+ * The published layout at dos.sunbiz.org/data-definitions/cor.html names
+ * position 473 "File Date" and **does not say what format it is in** — the
+ * third thing that file's spec leaves out, after the officer P/C flag and the
+ * fixed-width name split. The obvious reading, yyyymmdd, is wrong, and it is
+ * wrong in the way this file specialises in: it produces something
+ * shaped like a date rather than an error.
+ *
+ * Two independent records settle it:
+ *
+ *   * `doc/cor/20260815c.txt`, published 2026-08-15, carries `08112026` on
+ *     every sampled record. As mmddyyyy that is 11 Aug 2026, four days before
+ *     publication, which is what a daily filing file should contain. As
+ *     yyyymmdd it is year 0811, month 20.
+ *   * The quarterly archive carries `11162011` — 16 Nov 2011 as mmddyyyy,
+ *     year 1116 month 20 as yyyymmdd. That value is what exposed the bug: it
+ *     reached Postgres, which rejected "1116-20-11" and aborted the whole
+ *     ingest *after* the 1.8 GB download.
+ *
+ * The daily path never hit this because FL had never actually been ingested —
+ * the adapter was built, tested against the layout, and left unrun.
+ *
+ * A record with an unreadable date is still a good record: it names an
+ * officer, which is the only thing this pipeline wants from it. So an
+ * unparseable date is dropped and the row is kept.
+ */
+export function isoFilingDate(filed: string): string | null {
+  if (!/^\d{8}$/.test(filed)) return null
+  const month = Number(filed.slice(0, 2))
+  const day = Number(filed.slice(2, 4))
+  const year = Number(filed.slice(4, 8))
+
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null
+  // Florida's oldest live filings are 19th-century; anything outside this is a
+  // misread field rather than a very old company.
+  if (year < 1800 || year > 2200) return null
+
+  const iso = `${filed.slice(4, 8)}-${filed.slice(0, 2)}-${filed.slice(2, 4)}`
+  const parsed = new Date(`${iso}T00:00:00Z`)
+  if (Number.isNaN(parsed.getTime())) return null
+  // Rejects 02-30, which `Date` would otherwise roll forward into March.
+  return parsed.toISOString().slice(0, 10) === iso ? iso : null
 }
 
 function matchesScope(entity: RegistryEntity, scope: FlOptions): boolean {

@@ -494,6 +494,7 @@ function normaliseState(raw: string): string {
   if (/^[A-Z]{2}$/.test(s)) return s
   const byName: Record<string, string> = {
     'NEW YORK': 'NY', FLORIDA: 'FL', COLORADO: 'CO',
+    OREGON: 'OR', CONNECTICUT: 'CT',
   }
   return byName[s] ?? ''
 }

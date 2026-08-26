@@ -28,3 +28,55 @@ than the distribution suggests. Recorded rather than worked around.
 **What would overturn it.** A different niche with a different footprint. The
 distribution is a property of *car wrap*, not of the pipeline — see the
 benchmark-niche warning in `HANDOFF.md` §11.
+
+---
+
+## 2026-08-26 — Which states get an adapter, and why the rest do not
+
+**Decision.** Five states have adapters: **NY, FL, CO, OR, CT**. That is not a
+first instalment — it is, as far as a live survey can establish, close to the
+whole set of US states publishing *free, bulk or API, officer-bearing* business
+entity data. The rest are blocked for reasons that will not yield to more
+engineering.
+
+**How the survey was done.** Two passes, because the first one lied.
+
+1. A published third-party matrix of bulk-data availability by state. It is
+   useful for the paid/free split and **wrong about this project's best
+   sources**: it lists Oregon under "no bulk download available" and New York as
+   "portal not observable", while we ingest both from free APIs. It surveyed
+   Secretary-of-State websites; the data is on the states' *open data portals*.
+   Do not trust it alone.
+2. A direct query of the Socrata catalog network (`api.us.socrata.com`) for
+   business-entity datasets, then a live fetch of each candidate's schema and
+   sample rows.
+
+**Result of pass 2 — the Socrata route is exhausted.** Across the whole
+federated network, the state business registries carrying person names are
+`data.ny.gov`, `data.colorado.gov`, `data.ct.gov` and `data.oregon.gov`. All
+four are adapted. There is no fifth.
+
+**Verified and rejected, with the reason:**
+
+| State | Leads | Verdict |
+|---|---|---|
+| CT | 28 | **Adapted.** 1.29M master / 1.78M principals / 1.31M agents, joined |
+| OR | 25 | **Adapted.** 1.57M rows, one per associated name |
+| MA | 54 | Search portal only, no bulk or API. Highest-value state we cannot reach |
+| NC | 39 | Paid subscription, and the site **prohibits automated searches** |
+| AK | 22 | Free CSV, but behind DataDome bot protection (403) |
+| OH | 12 | Free CSV monthly, but behind Cloudflare (403) |
+| IL, CA, TX | 66, 60, 5 | Paid-only, excluded by instruction |
+| IN, IA, UT, MN, MI, GA, KY, NJ, NV, ND, OK, SD, WI, ME, HI, AR, ID | — | Paid bulk access |
+| KS, MO, LA, MD, AL, AZ, MS, PA, and others | — | No bulk product at all |
+
+**The consequence worth stating plainly.** The five adapted states hold **205 of
+the 1,042** car-wrap businesses (19.7%). CA and IL alone are another 126 that a
+budget decision, not an engineering one, puts out of reach.
+
+**What would overturn it.** MA, AK and OH are the three worth revisiting. AK and
+OH publish the data for free and merely wall the transport — a residential
+session would fetch them, at the cost of scraping past a bot wall, which is a
+different risk posture and was not taken unilaterally. MA has no bulk product
+but does have a free public search, which the `lookup()` half of the adapter
+interface already accommodates at one request per lead.

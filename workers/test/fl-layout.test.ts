@@ -11,7 +11,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { parseRecord, recentDailyFiles } from '../src/sources/registry/fl.js'
+import { parseRecord, recentDailyFiles, isoFilingDate } from '../src/sources/registry/fl.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const lines = readFileSync(join(here, 'fixtures/fl-cor-sample.txt'), 'latin1')
@@ -85,9 +85,31 @@ describe('parseRecord', () => {
     expect(e.nameNorm).toBe('omoiyari mortuary service')
   })
 
-  it('parses the filing date into ISO', () => {
-    const e = parseRecord(lines[0])
-    expect(e.filingDate).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+  // The previous version of this test asserted only `/^\d{4}-\d{2}-\d{2}$/`,
+  // which "0811-20-26" satisfies — so a date read in entirely the wrong order
+  // passed for as long as FL was never actually ingested. Assert the value.
+  it('reads the filing date as mmddyyyy, not yyyymmdd', () => {
+    // These four records come from doc/cor/20260815c.txt and all carry
+    // `08112026`: 11 August 2026, four days before the file was published.
+    // Read as yyyymmdd that is year 0811, month 20.
+    for (const line of lines) {
+      expect(parseRecord(line).filingDate).toBe('2026-08-11')
+    }
+  })
+
+  it('drops a filing date that is eight digits but not a date', () => {
+    // The quarterly archive carries values like this, and one of them aborted
+    // a whole ingest after a 1.8 GB download. The row is still worth keeping —
+    // it names an officer — so the date goes and the record stays.
+    expect(isoFilingDate('00000000')).toBeNull()
+    expect(isoFilingDate('13012020')).toBeNull()
+    expect(isoFilingDate('02302011')).toBeNull()
+    expect(isoFilingDate('1234')).toBeNull()
+  })
+
+  it('accepts the real dates either end of the plausible range', () => {
+    expect(isoFilingDate('12311999')).toBe('1999-12-31')
+    expect(isoFilingDate('11162011')).toBe('2011-11-16')
   })
 })
 
