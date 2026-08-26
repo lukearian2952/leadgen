@@ -67,6 +67,8 @@ const SPECS: VarSpec[] = [
     degrades: 'Socrata requests are throttled harder (shared anonymous pool)' },
   { name: 'REGISTRY_REVERSE_STATEWIDE', requiredFor: [],
     degrades: 'reverse officer lookup stays county-scoped (no statewide fallback)' },
+  { name: 'REGISTRY_MAX_DB_MB', requiredFor: [],
+    degrades: 'registry ingest runs without a database-size ceiling' },
 
   // Mailbox construction
   { name: 'PATTERN_LADDER_EXTRAS', requiredFor: [],
@@ -144,6 +146,15 @@ export interface Config {
   socrataAppToken: string
   /** Fall back to a statewide officer search when the county scope misses. */
   registryReverseStatewide: boolean
+  /**
+   * Abort a registry ingest once `pg_database_size` reaches this many MB.
+   *
+   * Supabase's free plan stops at 500 MB and a project that reaches it goes
+   * read-only — which would take down the whole fleet, not just the ingest.
+   * The default leaves 100 MB of headroom for the tables an ingest does not
+   * touch. 0 disables the ceiling.
+   */
+  registryMaxDbMb: number
   /** Append the four Phase 4 extra shapes to the candidate ladder. */
   patternLadderExtras: boolean
   verify: {
@@ -247,6 +258,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     socrataAppToken:    env.SOCRATA_APP_TOKEN ?? '',
     registryReverseStatewide:
       (env.REGISTRY_REVERSE_STATEWIDE ?? '').trim().toLowerCase() === 'true',
+    registryMaxDbMb: Number(env.REGISTRY_MAX_DB_MB ?? 400),
     // Default off: measured on the 75-business benchmark as zero recovery for
     // 2.6x the verification spend. See EXTRA_PATTERN_ORDER in lib/patterns.ts.
     patternLadderExtras:

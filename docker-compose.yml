@@ -57,6 +57,11 @@ x-worker-base: &worker-base
     # matching entities inside registry-match, so a common name is rejected
     # rather than attached to the wrong business.
     REGISTRY_REVERSE_STATEWIDE: ${REGISTRY_REVERSE_STATEWIDE:-true}
+    # Abort a registry ingest once the database reaches this many MB. Supabase's
+    # free plan stops at 500 MB and a project that reaches it goes read-only,
+    # which takes down the whole fleet and not just the ingest. Raise this only
+    # alongside more disk.
+    REGISTRY_MAX_DB_MB: ${REGISTRY_MAX_DB_MB:-400}
     # The four extra candidate shapes measured as a straight loss on the
     # med spa benchmark. Off unless a niche justifies re-measuring.
     PATTERN_LADDER_EXTRAS: ${PATTERN_LADDER_EXTRAS:-false}
