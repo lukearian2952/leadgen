@@ -162,12 +162,8 @@ function LowYieldExplanation({
               {censusRate(preflight).toFixed(1)}%
             </span>{' '}
             of these businesses publish a personal address on their own domain
-            ({preflight.businesses_with_personal} of {preflight.businesses_found}). That
-            predicted{' '}
-            <span className="font-medium">
-              {preflight.predicted_tier_a_low}–{preflight.predicted_tier_a_high}% Tier A
-            </span>{' '}
-            ({preflight.predicted_band}). You got {pct}% sendable.
+            ({preflight.businesses_with_personal} of {preflight.businesses_found}).
+            You got {pct}% sendable.
           </p>
           <p className="mt-1.5 text-amber-300/70">
             A business that does not publish a personal address cannot be emailed at

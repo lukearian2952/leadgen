@@ -76,8 +76,10 @@ images silently keep running.
 the queue and job bookkeeping. **25 MB** of the free plan's 500 MB.
 
 **registry-db** — a local Postgres container holding `registry_entities`,
-`zip_county` and `registry_ingest_runs`. 241 MB, 304,267 entities, bounded by
-`REGISTRY_MAX_DB_MB` (20 GB) rather than by a plan.
+`zip_county` and `registry_ingest_runs`. **1,176 MB, 1,741,635 entities** (NY
+whole-state since 2026-08-27), bounded by `REGISTRY_MAX_DB_MB` (20 GB) rather
+than by a plan. Dumped nightly at 03:20 UTC to `/opt/leadgen/backups`, seven
+kept, restore-tested.
 
 The registry moved because it was 239 MB of a 276 MB Supabase database and is
 the only table that grows without bound, while being entirely internal — no RLS
@@ -360,7 +362,22 @@ The question is whether later scroll pages cost the same per page while yielding
 fewer new businesses. **Until measured, run at depth 10** so cost matches the
 figures here rather than an untested one.
 
-### 8.3 Registry coverage — **done**, and measured (2026-08-26)
+### 8.3 Registry coverage — five states; NY loaded whole (2026-08-27)
+
+**NY is whole-state**: 4,273,719 rows seen, 1,474,376 stored, 95,895 →
+1,532,811. The other four remain niche-scoped, and loading them whole is now the
+cheapest large improvement available — NY took 31 minutes and 930 MB.
+
+**Whole-state changed what the pipeline can do, not just how much.** The reverse
+lookup went from 1 hit in 1,042 leads (niche-scoped) to **50 in 586** — 28% of
+all matches. The earlier "worth keeping, not worth expanding" verdict was an
+artefact of the scoping and is retracted.
+
+**Multipliers**, for estimating what another state is worth: **0.3 sendable per
+new name whole-state**, 0.4 niche-scoped. And `registry-coverage-delta.ts`
+over-predicts naming by ~18% — it is an upper bound, not a forecast.
+
+### 8.3.1 Registry coverage — the original five-state result (2026-08-26)
 
 Five states now: **NY, FL, CO, OR, CT**, 304,267 person-bearing entities.
 FL's quarterly archive is ingested; OR and CT are new adapters. Weekly
@@ -434,18 +451,21 @@ than left to read as a bug.
 with a live alert (Verifalia's 402s today would have been the cheapest possible
 test); Playwright needs a network this environment does not have.
 
-### 8.6 The preflight census has never been run
+### 8.6 The preflight census — run, and it fails its own launch test
 
-`preflight_runs` is **empty**. The census was built and shipped as a product
-feature in `fe791d5` with 13 passing tests and has never once been executed
-against a real niche. Both UI panels added in Phase 5 therefore render only
-their no-census fallback, and the predictor has never been checked against a
-known answer.
+**Run for the first time 2026-08-27.** There was no `preflight:*` job and never
+had been: a predictor with 13 passing tests, a table, and two UI panels, with no
+path from a niche to a number. `scripts/preflight-census.ts` is now that path.
 
-That is precisely the shape Florida's date bug had — built, asserted against the
-spec, never executed, wrong. The med spa / Long Island run is 75 businesses of
-ground truth already in the table. One census against it costs about a dollar
-and would both populate the UI and test the predictor.
+**It should not ship as a predictor.** Across five real niches it returned the
+*same* band for every one. `SEED_CALIBRATION`'s three points cannot be
+reproduced from the data by any reading — two independent attempts gave 9/21/19
+and 6/15/11 against the seed's 2/12/13 — and no code produces them. The
+thresholds were set for that vanished scale.
+
+The UI now shows the census (reproducible, and directly the thing that decides
+whether a niche is emailable) and **not** the band. `docs/DECISIONS.md` and
+`docs/REPORTS/2026-08-27-backups-whole-state-preflight.md` §3 have the numbers.
 
 ### 8.7 SaaS / online-niche discovery — built (2026-08-27)
 

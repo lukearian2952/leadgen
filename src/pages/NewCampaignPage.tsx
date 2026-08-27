@@ -1,6 +1,6 @@
 import { useState, useEffect, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowLeft, Info, Gauge, FlaskConical, AlertTriangle, CheckCircle2 } from 'lucide-react'
+import { ArrowLeft, Info, Gauge, FlaskConical, CheckCircle2 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useCampaignRunner, DEFAULT_RESIDENTIAL_BUDGET_BYTES } from '../hooks/useCampaignRunner'
 import { Button } from '../components/ui/Button'
@@ -84,30 +84,30 @@ function CensusPanel({ niche, location }: { niche: string; location: string }) {
   }
 
   const rate = censusRate(preflight)
-  const poor = preflight.predicted_band === 'poor'
 
+  // The predicted Tier A band is deliberately not shown. Run against five real
+  // niches on 2026-08-27 it returned the *same* band for every one of them —
+  // its three calibration points cannot be reproduced from any measurement in
+  // the code, and the thresholds were set for a scale nothing now lands on.
+  // A number that never varies is not a prediction. `docs/DECISIONS.md` has it.
+  //
+  // The census itself is worth showing: it is reproducible, and it is directly
+  // the thing that decides whether a niche can be emailed at all.
   return (
-    <div className={`flex gap-2.5 rounded-lg border p-3 text-xs ${
-      poor ? 'border-amber-800 bg-amber-950/40 text-amber-300'
-           : 'border-brand-900 bg-brand-950/30 text-brand-300'}`}>
-      {poor
-        ? <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-        : <CheckCircle2 size={14} className="mt-0.5 shrink-0" />}
+    <div className="flex gap-2.5 rounded-lg border border-brand-900 bg-brand-950/30 p-3 text-xs text-brand-300">
+      <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
       <div className="leading-relaxed">
         <span className="font-medium">
-          Census: {rate.toFixed(1)}% publish a personal address on their own domain.
+          Census: {rate.toFixed(1)}% of these businesses publish a personal address
+          on their own domain
         </span>{' '}
-        Predicts <span className="font-medium">
-          {preflight.predicted_tier_a_low}–{preflight.predicted_tier_a_high}% Tier A
-        </span>{' '}
-        ({preflight.predicted_band}), from a {preflight.sample_size}-business sample.
-        {poor && (
-          <span className="mt-1 block text-amber-400/90">
-            Expect most yield as Tier B — named owners at catch-all or published
-            addresses — rather than Tier A. Consider a different niche before
-            spending the budget.
-          </span>
-        )}
+        ({preflight.businesses_with_personal} of {preflight.businesses_found}).
+        <span className="mt-1 block text-brand-400/80">
+          A business that does not publish one cannot be emailed at one, however
+          well the pipeline runs. This is the strongest single signal we measure —
+          but it is not yet calibrated well enough to predict a Tier A percentage,
+          so treat it as a comparison between niches rather than a forecast.
+        </span>
       </div>
     </div>
   )
