@@ -12,7 +12,7 @@
 
 import { describe, it, expect } from 'vitest'
 import {
-  tierOf, countTiers, isSendable, sendableRate, isLowYield,
+  tierOf, countTiers, isSendable, sendableRate, isLowYield, censusRate,
   LOW_YIELD_THRESHOLD_PCT,
 } from '../../src/lib/tiers.js'
 
@@ -121,5 +121,30 @@ describe('isLowYield', () => {
   it('does not call an empty campaign low-yield', () => {
     // A campaign that has discovered nothing yet has not failed at anything.
     expect(isLowYield({ A: 0, B: 0, C: 0, rejected: 0 }, 0)).toBe(false)
+  })
+})
+
+describe('censusRate', () => {
+  const p = (businesses_with_personal: number, businesses_found: number) =>
+    ({ businesses_with_personal, businesses_found })
+
+  it('is businesses over businesses, not addresses over addresses', () => {
+    // The first UI version divided on_domain_personal by addresses_seen. A
+    // niche where ten businesses each publish three personal addresses would
+    // have read as 100% reachable while only ten businesses were.
+    expect(censusRate(p(9, 75))).toBeCloseTo(12.0, 1)
+    expect(censusRate(p(21, 79))).toBeCloseTo(26.6, 1)
+  })
+
+  it('agrees with the worker-side definition on the measured campaigns', () => {
+    // lib/preflight.ts computes businessesWithPersonal / businessesFound. If
+    // these drift, the number shown to a user is not the number the prediction
+    // was made from.
+    expect(censusRate(p(19, 100))).toBeCloseTo(19.0, 1)
+    expect(censusRate(p(58, 149))).toBeCloseTo(38.9, 1)
+  })
+
+  it('is zero rather than NaN for a census that found nothing', () => {
+    expect(censusRate(p(0, 0))).toBe(0)
   })
 })

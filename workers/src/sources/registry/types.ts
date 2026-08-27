@@ -51,6 +51,16 @@ export interface IngestScope {
   nameContains?: string[]
   /** Hard ceiling on rows pulled, so a bad scope cannot run away. */
   limit?: number
+  /**
+   * Rows per upstream request.
+   *
+   * The default (1,000) is right for a niche-scoped slice of a few thousand
+   * entities, where a big page mostly wastes bandwidth. A **whole-state**
+   * ingest is a different shape: NY is 4.27M rows, which at 1,000 a page is
+   * 4,267 round trips against a throttled anonymous pool. Socrata's JSON
+   * ceiling is 50,000; adapters clamp to it.
+   */
+  pageSize?: number
 }
 
 export interface RegistryAdapter {

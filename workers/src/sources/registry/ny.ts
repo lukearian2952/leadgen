@@ -74,7 +74,8 @@ export class NyRegistry implements RegistryAdapter {
     this.logger.info('ny registry ingest', { where, limit: scope.limit })
 
     for await (const page of this.client.pages({
-      select: SELECT, where, order: 'dos_id', pageSize: 1000, limit: scope.limit,
+      select: SELECT, where, order: 'dos_id',
+      pageSize: scope.pageSize ?? 1000, limit: scope.limit,
     })) {
       for (const row of page) yield toEntity(row as NyRow)
     }

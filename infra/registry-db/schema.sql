@@ -118,6 +118,14 @@ create table if not exists public.registry_ingest_runs (
   mode          text,
   name_contains text[] not null default '{}',
   counties      text[] not null default '{}',
+  -- True when the slice is deliberately unscoped: the whole state, not a niche.
+  --
+  -- Without this, an empty `name_contains` is ambiguous — it is either "load
+  -- everything" or a bad record, and `registry:refresh` cannot tell. It used to
+  -- resolve that by skipping empty scopes, which was right when unscoped meant
+  -- accidental and becomes silently wrong the moment a whole state is loaded on
+  -- purpose: NY would simply stop being refreshed.
+  whole_state   boolean not null default false,
   seen          bigint not null default 0,
   written       bigint not null default 0,
   with_person   bigint not null default 0,

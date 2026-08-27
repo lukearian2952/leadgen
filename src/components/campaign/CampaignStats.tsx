@@ -2,6 +2,7 @@ import { UserCheck, Globe, Filter, AlertTriangle, Gauge, Users } from 'lucide-re
 import type { Campaign, PreflightRun, Tier } from '../../lib/types'
 import { TIER_DESCRIPTION } from '../../lib/types'
 import type { TierCounts } from '../../lib/tiers'
+import { censusRate } from '../../lib/tiers'
 export type { TierCounts }
 
 /**
@@ -149,7 +150,7 @@ function LowYieldExplanation({
         </div>
       </div>
 
-      {preflight && preflight.status === 'ok' ? (
+      {preflight && preflight.status === 'complete' ? (
         <div className="rounded-lg border border-amber-900/60 bg-amber-950/40 px-3 py-2 text-xs leading-relaxed text-amber-200/90">
           <div className="mb-1 font-medium text-amber-200">
             The census said so before the run
@@ -158,10 +159,10 @@ function LowYieldExplanation({
             A {preflight.sample_size}-business census of{' '}
             <span className="font-medium">{preflight.niche}</span> found{' '}
             <span className="font-medium">
-              {pctOf(preflight.on_domain_personal, preflight.addresses_seen)}
+              {censusRate(preflight).toFixed(1)}%
             </span>{' '}
-            of the addresses these businesses publish are personal ones on their own
-            domain ({preflight.on_domain_personal} of {preflight.addresses_seen}). That
+            of these businesses publish a personal address on their own domain
+            ({preflight.businesses_with_personal} of {preflight.businesses_found}). That
             predicted{' '}
             <span className="font-medium">
               {preflight.predicted_tier_a_low}–{preflight.predicted_tier_a_high}% Tier A
@@ -187,10 +188,6 @@ function LowYieldExplanation({
       </p>
     </div>
   )
-}
-
-function pctOf(n: number, d: number): string {
-  return d > 0 ? `${((n / d) * 100).toFixed(1)}%` : '—'
 }
 
 export function CampaignStats({

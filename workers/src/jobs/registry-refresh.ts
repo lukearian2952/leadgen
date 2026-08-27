@@ -46,10 +46,21 @@ interface Payload {
  */
 const STAGGER_MINUTES = 20
 
+/**
+ * Paging for a whole-state refresh.
+ *
+ * A niche slice is a few thousand rows and the default 1,000-row page is right
+ * for it. NY whole-state is 4.27M rows, which at 1,000 a page is 4,267 round
+ * trips against a throttled anonymous pool.
+ */
+const WHOLE_STATE_PAGE_SIZE = 10_000
+const WHOLE_STATE_BATCH = 2_000
+
 interface LastScope {
   state: string
   nameContains: string[]
   mode: string | null
+  wholeState: boolean
 }
 
 export function makeRegistryRefreshTask(deps: TaskDeps): Task {
@@ -64,8 +75,9 @@ export function makeRegistryRefreshTask(deps: TaskDeps): Task {
     // on state and upserted, so there is no ordering to get wrong.
     const { rows } = await registryDb.query<{
       state: string; name_contains: string[] | null; mode: string | null
+      whole_state: boolean
     }>(
-      `select state, name_contains, mode from registry_ingest_runs`)
+      `select state, name_contains, mode, whole_state from registry_ingest_runs`)
 
     const scopes: LastScope[] = rows
       .filter(r => wanted.has(r.state.toUpperCase()))
@@ -73,8 +85,12 @@ export function makeRegistryRefreshTask(deps: TaskDeps): Task {
         state: r.state.toUpperCase(),
         nameContains: Array.isArray(r.name_contains) ? r.name_contains : [],
         mode: r.mode,
+        wholeState: r.whole_state === true,
       }))
-      .filter(s => s.nameContains.length > 0)
+      // An empty scope is either "the whole state, deliberately" or a record
+      // that lost its tokens. Only the first is refreshable; re-running the
+      // second would pull 4.27M rows for NY by accident.
+      .filter(s => s.wholeState || s.nameContains.length > 0)
 
     if (!scopes.length) {
       ctx.logger.warn('registry refresh found no loaded slice to refresh', {
@@ -89,7 +105,9 @@ export function makeRegistryRefreshTask(deps: TaskDeps): Task {
       const runAt = new Date(Date.now() + queued * STAGGER_MINUTES * 60_000)
       await ctx.helpers.addJob('registry:ingest', {
         state: scope.state,
-        nameContains: scope.nameContains,
+        ...(scope.wholeState
+          ? { wholeState: true, pageSize: WHOLE_STATE_PAGE_SIZE, batchSize: WHOLE_STATE_BATCH }
+          : { nameContains: scope.nameContains }),
         ...(scope.mode ? { mode: scope.mode } : {}),
       }, {
         runAt,

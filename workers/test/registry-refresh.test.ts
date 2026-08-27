@@ -122,10 +122,41 @@ describe('registry:refresh', () => {
     expect(added).toHaveLength(0)
   })
 
-  it('skips a recorded run that carried no name tokens', async () => {
-    // An unscoped ingest is 4.27M rows for NY. If the history has one, it is a
-    // bad record rather than an instruction.
-    const { added } = await run([{ state: 'NY', name_contains: [], mode: null }])
+  it('skips a recorded run that lost its name tokens', async () => {
+    // An empty scope that is *not* flagged whole-state is a bad record, and
+    // re-running it would pull 4.27M rows for NY by accident.
+    const { added } = await run([
+      { state: 'NY', name_contains: [], mode: null, whole_state: false },
+    ])
     expect(added).toHaveLength(0)
+  })
+
+  it('refreshes a deliberately whole-state slice, which has no tokens by design', async () => {
+    // The same empty scope, flagged. Without the flag the guard above would
+    // silently stop refreshing NY the moment it was loaded whole.
+    const { added } = await run([
+      { state: 'NY', name_contains: [], mode: null, whole_state: true },
+    ])
+    expect(added).toHaveLength(1)
+    expect(added[0].payload.wholeState).toBe(true)
+    expect(added[0].payload).not.toHaveProperty('nameContains')
+  })
+
+  it('gives a whole-state refresh bigger pages than a niche slice', async () => {
+    // 4.27M rows at the default 1,000 a page is 4,267 round trips against a
+    // throttled anonymous pool.
+    const { added } = await run([
+      { state: 'NY', name_contains: [], mode: null, whole_state: true },
+    ])
+    expect(added[0].payload.pageSize).toBe(10_000)
+    expect(added[0].payload.batchSize).toBe(2_000)
+  })
+
+  it('does not send whole-state paging to a niche slice', async () => {
+    const { added } = await run([
+      { state: 'CT', name_contains: CAR_WRAP, mode: null, whole_state: false },
+    ])
+    expect(added[0].payload).not.toHaveProperty('pageSize')
+    expect(added[0].payload.nameContains).toEqual(CAR_WRAP)
   })
 })

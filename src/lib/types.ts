@@ -131,7 +131,8 @@ export interface PreflightRun {
   niche: string
   location: string
   sample_size: number
-  status: string
+  /** `running` | `complete` | `failed` — enforced by a check constraint. */
+  status: 'running' | 'complete' | 'failed'
   businesses_found: number
   businesses_with_site: number
   addresses_seen: number

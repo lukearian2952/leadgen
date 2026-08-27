@@ -6,6 +6,7 @@ import { useCampaignRunner, DEFAULT_RESIDENTIAL_BUDGET_BYTES } from '../hooks/us
 import { Button } from '../components/ui/Button'
 import { Input } from '../components/ui/Input'
 import type { PreflightRun } from '../lib/types'
+import { censusRate } from '../lib/tiers'
 
 const LOCATION_HINTS = [
   'Texas', 'Florida', 'California', 'New York', 'Illinois',
@@ -67,7 +68,7 @@ function CensusPanel({ niche, location }: { niche: string; location: string }) {
 
   if (!checked) return null
 
-  if (!preflight || preflight.status !== 'ok') {
+  if (!preflight || preflight.status !== 'complete') {
     return (
       <div className="flex gap-2.5 rounded-lg border border-gray-800 bg-gray-900 p-3 text-xs text-gray-500">
         <FlaskConical size={14} className="mt-0.5 shrink-0" />
@@ -82,9 +83,7 @@ function CensusPanel({ niche, location }: { niche: string; location: string }) {
     )
   }
 
-  const rate = preflight.addresses_seen > 0
-    ? (preflight.on_domain_personal / preflight.addresses_seen) * 100
-    : 0
+  const rate = censusRate(preflight)
   const poor = preflight.predicted_band === 'poor'
 
   return (

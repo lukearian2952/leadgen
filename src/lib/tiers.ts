@@ -6,7 +6,7 @@
 // reason this file imports nothing but types: anything touching React or the
 // Supabase client would drag a browser environment into a Node test run.
 
-import type { Lead, Tier } from './types'
+import type { Lead, PreflightRun, Tier } from './types'
 
 /**
  * A lead's tier, falling back to v1's boolean.
@@ -90,4 +90,21 @@ export const LOW_YIELD_THRESHOLD_PCT = 25
 
 export function isLowYield(counts: TierCounts, discovered: number): boolean {
   return discovered > 0 && sendableRate(counts, discovered) < LOW_YIELD_THRESHOLD_PCT
+}
+
+/**
+ * The census rate: what share of businesses publish a personal address on
+ * their own domain.
+ *
+ * **Businesses over businesses, not addresses over addresses.** The first UI
+ * version of this divided `on_domain_personal` by `addresses_seen`, which is a
+ * different and much larger number — a niche where ten businesses each publish
+ * three personal addresses would have read as 100% while only ten businesses
+ * were reachable. `lib/preflight.ts` on the worker side defines it as
+ * `businessesWithPersonal / businessesFound`, and this must agree with it or
+ * the number shown to a user is not the number the prediction was made from.
+ */
+export function censusRate(p: Pick<PreflightRun, 'businesses_with_personal' | 'businesses_found'>): number {
+  if (!p.businesses_found) return 0
+  return (p.businesses_with_personal / p.businesses_found) * 100
 }

@@ -33,6 +33,23 @@ interface Payload {
   keepAnonymous?: boolean
   /** Keep the per-adapter `raw` payload. Default false on a bulk ingest. */
   keepRaw?: boolean
+  /**
+   * Load the entire state rather than a niche-scoped slice.
+   *
+   * Requires `nameContains` to be empty and is recorded, so the weekly refresh
+   * can tell a deliberate whole-state load from a scope that went missing.
+   */
+  wholeState?: boolean
+  /** Rows per upstream request. See `IngestScope.pageSize`. */
+  pageSize?: number
+  /**
+   * Rows per upsert statement.
+   *
+   * 500 × 14 columns is 7,000 bind parameters; Postgres allows 65,535, so
+   * there is room. Raised only for whole-state ingests, where the round trip
+   * rather than the statement is the cost.
+   */
+  batchSize?: number
   [key: string]: unknown
 }
 
@@ -84,10 +101,18 @@ export function makeRegistryIngestTask(deps: TaskDeps): Task {
         'Free from evergreen.data.socrata.com/signup; ingest will be slower and may 429.')
     }
 
+    const wholeState = payload.wholeState === true
+    if (wholeState && (payload.nameContains ?? []).length) {
+      throw new Error(
+        'wholeState and nameContains are mutually exclusive — a whole-state ' +
+        'ingest is by definition unscoped. Drop one.')
+    }
+
     const scope: IngestScope & Record<string, unknown> = {
       counties: payload.counties ?? [],
       nameContains: payload.nameContains ?? [],
       limit: payload.limit,
+      pageSize: payload.pageSize,
       mode: payload.mode,
       days: payload.days,
     }
@@ -125,9 +150,11 @@ export function makeRegistryIngestTask(deps: TaskDeps): Task {
       }
     }
 
+    const batchSize = Math.max(100, Math.min(payload.batchSize ?? BATCH, 4_000))
+
     for await (const entity of adapter.ingest(scope)) {
       batch.push(entity)
-      if (batch.length >= BATCH) {
+      if (batch.length >= batchSize) {
         await flush()
         if (budgetStop) break
       }
@@ -147,6 +174,8 @@ export function makeRegistryIngestTask(deps: TaskDeps): Task {
       skipped_anonymous: skippedAnonymous,
       person_rate: seen ? Number((withPerson / seen).toFixed(3)) : 0,
       counties: scope.counties, name_contains: scope.nameContains,
+      whole_state: wholeState,
+      page_size: scope.pageSize ?? 1000, batch_size: batchSize,
       db_mb_start: startMb, db_mb_end: endMb, db_cap_mb: capMb,
       // The difference between "this state is loaded" and "this state is
       // loaded as far as the disk allowed". Every consumer of coverage
@@ -161,11 +190,13 @@ export function makeRegistryIngestTask(deps: TaskDeps): Task {
     await registryDb.query(
       `insert into registry_ingest_runs
          (state, adapter, mode, name_contains, counties,
-          seen, written, with_person, skipped_anonymous, complete, db_mb_end, finished_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+          seen, written, with_person, skipped_anonymous, complete, db_mb_end,
+          whole_state, finished_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
        on conflict (state) do update
          set adapter = excluded.adapter, mode = excluded.mode,
              name_contains = excluded.name_contains, counties = excluded.counties,
+             whole_state = excluded.whole_state,
              seen = excluded.seen, written = excluded.written,
              with_person = excluded.with_person,
              skipped_anonymous = excluded.skipped_anonymous,
@@ -173,7 +204,7 @@ export function makeRegistryIngestTask(deps: TaskDeps): Task {
              finished_at = now()`,
       [state, adapter.name, payload.mode ?? null,
        scope.nameContains ?? [], scope.counties ?? [],
-       seen, written, withPerson, skippedAnonymous, !budgetStop, endMb])
+       seen, written, withPerson, skippedAnonymous, !budgetStop, endMb, wholeState])
 
     if (budgetStop) throw new RegistryBudgetExceeded(endMb, capMb, written)
   })
