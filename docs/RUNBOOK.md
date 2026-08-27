@@ -373,11 +373,22 @@ refusing. **Only "does application data flow" is a valid test from off-box.**
   target and will be overwritten by the next rsync. **Never edit code on the
   server**: the next deploy silently reverts it and you will spend an afternoon
   finding out why.
-* **registry-db** — lives in the `registry-db-data` Docker volume, which
-  survives a container rebuild but not `docker compose down -v`. Rebuildable
-  from the adapters and cheaper to re-ingest than to restore, though FL is a
-  1.8 GB download and fifteen minutes. `registry_ingest_runs` records the scope
-  each state was loaded under, so a rebuild does not have to guess.
+* **registry-db** — dumped nightly at **03:20 UTC** to `/opt/leadgen/backups`,
+  seven kept, `pg_dump --format=custom`. ~33 MB per dump against a 241 MB
+  database. Restore-tested 2026-08-27: all rows, all seven indexes, and a live
+  trigram match against the restored copy.
+
+  ```bash
+  ./infra/registry-db/backup.sh          # manual dump; prunes to KEEP=7
+  ./infra/registry-db/restore-test.sh    # scratch container, counts, self-deletes
+  tail /opt/leadgen/backups/backup.log   # what cron did
+  pg_restore -U registry -d registry --no-owner --clean <dump>   # the real thing
+  ```
+
+  The volume survives a container rebuild but not `docker compose down -v`.
+  `registry_ingest_runs` records the scope each state was loaded under, so even
+  a from-scratch rebuild does not have to guess — though FL is a 1.8 GB download
+  and fifteen minutes, which is the reason the dump exists.
 * **Exports** — `exports/` is gitignored and holds customer records. Not backed
   up anywhere; treat a CSV there as the only copy.
 

@@ -1,0 +1,13 @@
+# registry-db nightly backup.
+#
+# Install:  crontab -l | cat - infra/registry-db/backup.cron | crontab -
+# Verify:   crontab -l
+#
+# 03:20 UTC — after registry:refresh's Sunday 03:00 kick has enqueued but before
+# the staggered ingests get far, so a Sunday dump captures the previous week's
+# state rather than a half-refreshed one. On the other six days nothing else is
+# running at that hour.
+#
+# Output goes to a log rather than to root's mail, which nobody reads on this
+# box. `flock` prevents two dumps overlapping if one ever runs long.
+20 3 * * * /usr/bin/flock -n /tmp/registry-backup.lock /opt/leadgen/infra/registry-db/backup.sh >> /opt/leadgen/backups/backup.log 2>&1
