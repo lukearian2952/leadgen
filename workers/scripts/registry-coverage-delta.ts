@@ -29,8 +29,13 @@ const MIN_SIMILARITY = 0.6
 const GENERIC_NAME_MIN_SIMILARITY = 0.9
 const STATEWIDE_MAX_ENTITIES = 2
 
-const campaignId = process.argv[2]
-if (!campaignId) throw new Error('usage: registry-coverage-delta.ts <campaignId> [--json out]')
+// A campaign id, or `--state XX` to sweep every campaign's leads in one state.
+const campaignId = process.argv[2]?.startsWith('--') ? null : process.argv[2]
+const stateAt = process.argv.indexOf('--state')
+const stateFilter = stateAt > 0 ? (process.argv[stateAt + 1] ?? '').toUpperCase() : null
+if (!campaignId && !stateFilter) {
+  throw new Error('usage: registry-coverage-delta.ts <campaignId>|--state XX [--json out]')
+}
 const jsonAt = process.argv.indexOf('--json')
 const jsonOut = jsonAt > 0 ? process.argv[jsonAt + 1] : null
 
@@ -65,10 +70,14 @@ const { rows: leads } = await db.query<Lead>(
           nullif(l.owner_first_name,'') owner_first_name,
           l.owner_source, l.tier
      from leads l left join businesses b on b.id = l.business_id
-    where l.campaign_id = $1
-    order by 3, 2`, [campaignId])
+    where ($1::uuid is null or l.campaign_id = $1)
+      and ($2::text is null
+           or upper(coalesce(nullif(l.state,''), b.state, '')) = $2)
+    order by 3, 2`, [campaignId, stateFilter])
 
-console.log(`campaign ${campaignId}: ${leads.length} leads\n`)
+console.log(
+  campaignId ? `campaign ${campaignId}: ${leads.length} leads\n`
+             : `state ${stateFilter}: ${leads.length} leads across all campaigns\n`)
 
 /** States the registry actually holds rows for right now. */
 const { rows: loaded } = await registryDb.query<{ state: string; n: string }>(

@@ -211,3 +211,88 @@ forced this, but not the reasons it is better: local disk is 121 GB against
 8 GB, the round trip is a container hop rather than a pooled connection to
 us-east-1, and the registry no longer competes with lead data for a shared
 budget.
+
+---
+
+## 2026-08-27 — The preflight ships as a census, not a predictor
+
+**Decision.** Show the census number. Do **not** show the predicted Tier A band,
+and do not gate campaigns on it, until the calibration is re-derived from a
+single code-defined measurement.
+
+**Evidence.** Five niches, run through the predictor for the first time:
+
+| niche | census | predicted | actual Tier A |
+|---|---|---|---|
+| med spa / Long Island | 12.0% | 6.3–9% good | 1.3% |
+| dental / Long Island | 26.6% | 6.3–9% good | 6.3% |
+| vehicle wrap / NY | 19.0% | 6.3–9% good | 9.0% |
+| car wrap / US | 19.5% | 6.3–9% good | 7.4% |
+| practice mgmt SaaS / US | 38.9% | 6.3–9% good | 10.1% |
+
+**Every niche got the same prediction.** 3 of 5 landed in band, which means
+nothing when the band never varies.
+
+**Root cause.** `SEED_CALIBRATION`'s three points (2.667 / 15.19 / 13.0) cannot
+be reproduced from the data by any reading — two independent attempts gave
+9/21/19 and 6/15/11 — and no code produces them. They were computed by hand or
+by a script that is gone. The thresholds `POOR_MAX = 5` / `MODERATE_MAX = 10`
+were set for that vanished scale; every reproducible census lands above 10, so
+everything is "good".
+
+The census also does not track Tier A monotonically on n=5 (26.6% yields less
+than 19.0%), so there is not yet a relationship to calibrate *to*.
+
+**What would overturn it.** Five to ten more campaigns measured through
+`scripts/preflight-census.ts`, which is now the one definition in code. If a
+relationship appears, set the thresholds from those points and delete
+`SEED_CALIBRATION`.
+
+---
+
+## 2026-08-27 — The registry-name multiplier is 0.3 for whole-state slices
+
+**Decision.** Estimate sendable gain as **0.3 × new names** for a whole-state
+slice, **0.4** for a niche-scoped one.
+
+**Evidence.** NY whole-state over 586 leads across 8 campaigns: the delta
+forecast +54 names, 44 materialised, 14 converted to sendable. That is 0.26 per
+forecast name and 0.32 per actual name, against the 0.41 measured earlier on
+four niche-scoped states.
+
+**Why they differ.** A whole-state slice finds the marginal matches a niche
+slice misses, and those convert worse — they sit on businesses whose domains are
+more often catch-all or absent. More names, lower quality per name.
+
+**Related, and worth knowing wherever its output is quoted:**
+`registry-coverage-delta.ts` over-predicts naming by ~18%. It asks whether a
+registry officer would be *found*; the real stage then applies
+`applyNameDecision`'s name-class and corroboration rules, which reject some. It
+is an upper bound, not a forecast.
+
+---
+
+## 2026-08-27 — Whole-state coverage, and a retraction about reverse lookup
+
+**Retracted:** "the reverse lookup contributed 1 of 51 … worth keeping, not
+worth expanding" (registry coverage report §3).
+
+That was measured on niche-scoped slices, and it was an artefact of the scoping
+rather than a property of the reverse direction. Reverse lookup asks whether a
+person found on a website is an officer of *any* nearby entity; a slice holding
+only wrap-named companies cannot answer it.
+
+With NY loaded whole:
+
+| | niche-scoped, 5 states, 1,042 leads | NY whole-state, 586 leads |
+|---|---|---|
+| forward | 69 | 128 |
+| reverse (county) | 1 | **42** |
+| reverse (statewide) | 0 | **8** |
+
+The reverse direction is **28% of all matches** once the state is loaded whole.
+
+**Consequence.** Whole-state slices change what the pipeline can do, not just
+how much it finds. NY took 31 minutes and 930 MB against a 20 GB ceiling; the
+other four states are all smaller. This is now the cheapest large improvement
+available.
