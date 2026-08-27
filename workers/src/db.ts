@@ -19,6 +19,22 @@ const { Pool } = pg
 export interface Db {
   /** Transaction pooling (:6543). Every application query goes here. */
   app: pg.Pool
+  /**
+   * **registry-db** — the local Postgres holding `registry_entities` and
+   * `zip_county`. Null for every role that does not read them.
+   *
+   * A separate database rather than a schema, because the reason it moved was
+   * Supabase's 500 MB free-plan ceiling: the registry is the one table that
+   * grows without bound and the only one that is entirely internal — no RLS
+   * policy references it, no Realtime subscription watches it, the frontend has
+   * never read it.
+   *
+   * The boundary is clean by construction. `registry:match` reads a lead from
+   * `app`, asks `registry` about it, and writes the verdict back to `app`;
+   * there is no query that joins across the two, and there was none before the
+   * split either.
+   */
+  registry: pg.Pool | null
   close(): Promise<void>
 }
 
@@ -55,7 +71,66 @@ export function createDb(config: Config): Db {
     console.error(JSON.stringify({ level: 'error', message: 'pg app pool error', err: err.message }))
   })
 
-  return { app, async close() { await app.end().catch(() => {}) } }
+  // Only the registry role talks to registry-db. Opening the pool everywhere
+  // would mean every worker holding connections to a database it never queries,
+  // and would make a registry-db outage look like a fleet-wide failure.
+  const wantsRegistry = config.role === 'registry' || config.role === 'all'
+  let registry: pg.Pool | null = null
+
+  if (wantsRegistry && config.registryDatabaseUrl) {
+    registry = new Pool({
+      connectionString: config.registryDatabaseUrl,
+      // Local container, not a shared pooler: there is no 15-client budget to
+      // respect here, so this is sized for the ingest's batching rather than
+      // rationed.
+      max: Math.max(4, Math.min(config.concurrency + 2, 10)),
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 10_000,
+      application_name: `leadgen-registry-${config.role}`,
+    })
+    registry.on('error', err => {
+      console.error(JSON.stringify({
+        level: 'error', message: 'pg registry pool error', err: err.message,
+      }))
+    })
+  }
+
+  return {
+    app,
+    registry,
+    async close() {
+      await app.end().catch(() => {})
+      await registry?.end().catch(() => {})
+    },
+  }
+}
+
+/**
+ * Confirm registry-db is reachable and carries the schema we expect.
+ *
+ * Checked at boot rather than on the first job, because the failure mode
+ * otherwise is a `registry:match` that throws once per lead across a whole
+ * campaign — 1,042 identical errors that say "relation does not exist" and
+ * nothing about which database is missing it.
+ */
+export async function assertRegistryDb(db: Db, config: Config): Promise<void> {
+  if (!db.registry) return
+  try {
+    const { rows } = await db.registry.query<{ n: string }>(
+      `select count(*) n from registry_entities`)
+    console.error(JSON.stringify({
+      level: 'info',
+      message: 'registry-db connected',
+      entities: Number(rows[0]?.n ?? 0),
+    }))
+  } catch (err) {
+    throw new Error(
+      'REGISTRY_DATABASE_URL is set but registry-db is not usable: ' +
+      `${(err as Error).message}. The registry moved out of Supabase — see ` +
+      'infra/registry-db/schema.sql. Start it with `docker compose up -d ' +
+      'registry-db`; the schema is applied on first boot from the mounted file.',
+    )
+  }
 }
 
 /**

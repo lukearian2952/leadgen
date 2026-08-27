@@ -25,15 +25,13 @@
 //
 // Usage: npx tsx scripts/or-zip-county.ts [--apply]
 
-import pg from 'pg'
+import { registryPool } from './_db.js'
 
 const APPLY = process.argv.includes('--apply')
 const ENDPOINT = 'https://data.oregon.gov/resource/6g49-bcrm.json'
 
-const db = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, max: 1,
-})
+// `zip_county` moved to registry-db with the entities it is built from.
+const db = registryPool(1)
 
 const url = new URL(ENDPOINT)
 url.searchParams.set('$select', 'zip,county,count(1)')

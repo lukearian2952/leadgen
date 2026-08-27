@@ -61,7 +61,14 @@ x-worker-base: &worker-base
     # free plan stops at 500 MB and a project that reaches it goes read-only,
     # which takes down the whole fleet and not just the ingest. Raise this only
     # alongside more disk.
-    REGISTRY_MAX_DB_MB: ${REGISTRY_MAX_DB_MB:-400}
+    # The registries live in their own local Postgres, not in Supabase — see
+    # the registry-db service below for why. Only the `registry` role reads it.
+    REGISTRY_DATABASE_URL: postgres://${REGISTRY_DB_USER:-registry}:${REGISTRY_DB_PASSWORD}@registry-db:5432/${REGISTRY_DB_NAME:-registry}
+    # Abort a registry ingest once registry-db's own disk use reaches this. The
+    # host has 122 GB free and also runs Odoo, n8n and three other Postgres
+    # instances, so the ceiling is about being a good neighbour rather than
+    # about a plan limit.
+    REGISTRY_MAX_DB_MB: ${REGISTRY_MAX_DB_MB:-20000}
     # The four extra candidate shapes measured as a straight loss on the
     # med spa benchmark. Off unless a niche justifies re-measuring.
     PATTERN_LADDER_EXTRAS: ${PATTERN_LADDER_EXTRAS:-false}
@@ -257,6 +264,63 @@ services:
     ports:
       - "127.0.0.1:8085:8080"
 
+  # ── registry-db ─────────────────────────────────────────────────────────────
+  #
+  # The state business registries, on local disk instead of Supabase.
+  #
+  # Supabase is on the free plan: 500 MB, and a project that reaches it goes
+  # read-only, which takes the whole fleet down rather than one job. The
+  # registry was 238 MB of a 276 MB database and is the only table that grows
+  # without bound — five states of niche-scoped entities is 304k rows, and
+  # whole-state slices across fifty would be tens of millions.
+  #
+  # Nothing user-facing reads it: no RLS policy references it, no Realtime
+  # subscription watches it, the frontend has never queried it. It is a lookup
+  # table the workers consult, so it belongs next to the workers, where disk is
+  # 122 GB rather than 500 MB and the round trip is a container hop rather than
+  # a pooled connection to us-east-1.
+  #
+  # Bound to 127.0.0.1 like every other LeadGen service — see docs/RUNBOOK §7.
+  registry-db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
+    shm_size: 256m
+    environment:
+      POSTGRES_USER: ${REGISTRY_DB_USER:-registry}
+      POSTGRES_PASSWORD: ${REGISTRY_DB_PASSWORD:?REGISTRY_DB_PASSWORD must be set}
+      POSTGRES_DB: ${REGISTRY_DB_NAME:-registry}
+      # This box also runs Odoo, n8n and three other Postgres instances. The
+      # defaults assume the machine is yours alone; these do not.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command:
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - work_mem=32MB
+      - -c
+      - maintenance_work_mem=256MB
+      # The trigram and GIN indexes are the whole point of this database; give
+      # the planner a reason to use them rather than sequential-scanning 304k
+      # rows on local SSD.
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_cache_size=1GB
+    volumes:
+      - registry-db-data:/var/lib/postgresql/data
+      - ./infra/registry-db/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${REGISTRY_DB_USER:-registry} -d ${REGISTRY_DB_NAME:-registry}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   # ── optional local pooler (only for self-hosted Postgres) ───────────────────
   pgbouncer:
     profiles: ["local-pool"]
@@ -353,3 +417,9 @@ services:
       <<: *worker-env
       WORKER_ROLE: linkedin
     ports: ["127.0.0.1:9104:9100"]
+
+volumes:
+  # Registry data survives a container rebuild. Losing it is not fatal —
+  # every state is re-ingestable from its adapter — but re-ingesting FL is a
+  # 1.8 GB download and fifteen minutes.
+  registry-db-data:

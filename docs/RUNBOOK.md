@@ -48,7 +48,8 @@ These are not hypothetical. Each one cost real hours.
 |---|---|
 | Server | `srv607166` / `92.112.184.200`, Ubuntu 24.04, 4 cores, 15 GB |
 | Deploy path | `/opt/leadgen` — **rsynced from the Mac, not a git checkout** |
-| Database | Supabase `paasggeawsoctfgqbqrd`, Postgres 17 |
+| Database | Supabase `paasggeawsoctfgqbqrd`, Postgres 17 — campaigns, leads, queue |
+| Registry DB | `registry-db` container, `127.0.0.1:5433`, volume `registry-db-data` |
 | Frontend | Netlify |
 | Repo | the Mac. The server has no git remote; `git log` there tells you nothing |
 
@@ -68,7 +69,7 @@ docker compose ps
 docker ps --format '{{.Names}}\t{{.Status}}' | grep leadgen
 ```
 
-Twelve containers, all `Up`. `unhealthy` on a worker usually means the
+Thirteen containers, all `Up`. `unhealthy` on a worker usually means the
 healthcheck timed out at 5s while the worker was busy — check it is still
 completing jobs before believing it:
 
@@ -214,8 +215,12 @@ docker compose up -d --force-recreate searxng
 
 ### "The database is full / writes are failing"
 
-**Supabase free plan stops at 500 MB and a project that reaches it goes
-read-only** — which takes down the whole fleet, not one job.
+**There are two databases now.** Which one matters.
+
+**Supabase** — free plan, 500 MB, and a project that reaches it goes read-only,
+taking the whole fleet down rather than one job. It holds campaigns, leads,
+businesses and job bookkeeping, and sat at **25 MB** after the registry moved
+out on 2026-08-27. If this is climbing, it is lead volume, not the registry.
 
 ```sql
 select pg_size_pretty(pg_database_size(current_database()));
@@ -224,13 +229,27 @@ select relname, pg_size_pretty(pg_total_relation_size(relid))
  order by pg_total_relation_size(relid) desc limit 10;
 ```
 
-`registry_entities` is almost always the largest. `registry:ingest` stops itself
-at `REGISTRY_MAX_DB_MB` (400) and reports `complete: false`; if you are past
-that, someone raised it. Reclaim by dropping a state's slice:
+**registry-db** — local Postgres, `registry_entities` and `zip_county`, bounded
+by disk rather than by a plan. `registry:ingest` stops itself at
+`REGISTRY_MAX_DB_MB` (20,000 = 20 GB) and reports `complete: false`.
 
-```sql
-delete from registry_entities where state = 'XX';
+```bash
+docker exec leadgen-registry-db-1 psql -U registry -d registry \
+  -c "select pg_size_pretty(pg_database_size(current_database()))" \
+  -c "select state, count(*) from registry_entities group by 1 order by 2 desc"
+df -h /            # the host also runs Odoo, n8n and three other Postgres
 ```
+
+Reclaim by dropping a state's slice — it is re-ingestable from its adapter:
+
+```bash
+docker exec leadgen-registry-db-1 psql -U registry -d registry \
+  -c "delete from registry_entities where state = 'XX'" -c "vacuum full"
+```
+
+**`leads.registry_entity_id` is no longer a foreign key.** It points at a row in
+a different database. It is provenance, not a join key, and may outlive the row
+it names.
 
 ### "A worker is crash-looping on EMAXCONNSESSION"
 
@@ -246,7 +265,7 @@ Three budgets, three different mechanisms.
 |---|---|---|
 | Residential bytes | `METER_BUDGET_BYTES`, 2.5 GB/campaign | `proxy-meter` refuses new connections |
 | Verification | `VERIFALIA_MAX_CENTS_PER_CAMPAIGN` = 3000 | `verify-worker`, per campaign |
-| Registry disk | `REGISTRY_MAX_DB_MB` = 400 | `registry:ingest`, checked every 20 batches |
+| Registry disk | `REGISTRY_MAX_DB_MB` = 20,000 (20 GB) | `registry:ingest`, checked every 20 batches, against **registry-db** |
 
 ```sql
 -- What a campaign actually spent
@@ -354,8 +373,11 @@ refusing. **Only "does application data flow" is a valid test from off-box.**
   target and will be overwritten by the next rsync. **Never edit code on the
   server**: the next deploy silently reverts it and you will spend an afternoon
   finding out why.
-* **`registry_entities`** — rebuildable from the adapters, and cheaper to
-  re-ingest than to restore.
+* **registry-db** — lives in the `registry-db-data` Docker volume, which
+  survives a container rebuild but not `docker compose down -v`. Rebuildable
+  from the adapters and cheaper to re-ingest than to restore, though FL is a
+  1.8 GB download and fifteen minutes. `registry_ingest_runs` records the scope
+  each state was loaded under, so a rebuild does not have to guess.
 * **Exports** — `exports/` is gitignored and holds customer records. Not backed
   up anywhere; treat a CSV there as the only copy.
 
@@ -366,7 +388,8 @@ refusing. **Only "does application data flow" is a valid test from off-box.**
 | Situation | Decision |
 |---|---|
 | Verifalia out of credits | Buy credits. No row can reach Tier A without it |
-| Database near 500 MB | Supabase Pro ($25/mo, 8 GB) or drop a registry state |
+| Supabase near 500 MB | It is lead volume now, not the registry. Supabase Pro ($25/mo, 8 GB), or prune old campaigns |
+| registry-db near 20 GB | Raise `REGISTRY_MAX_DB_MB`, or drop a state's slice |
 | Named-rate needs CA/IL | Paid registry data — a purchasing decision |
 | LinkedIn enrichment wanted | Supply `LINKEDIN_ACCOUNTS`, and say which worker to scale down |
 | Port 25 needed | Hostinger will not unblock; needs a different host or provider |

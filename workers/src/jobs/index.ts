@@ -25,8 +25,28 @@ import { makeSerpOwnerTask } from './serp-owner.js'
 
 export interface TaskDeps {
   config: Config
+  /** Supabase: leads, campaigns, job bookkeeping. Every stage uses this. */
   db: Pool
+  /**
+   * registry-db: `registry_entities` and `zip_county`, on local disk.
+   *
+   * Null for roles that do not read the registry. `registry:match` and
+   * `registry:ingest` fail loudly rather than silently degrading when it is
+   * missing — a matcher that quietly finds nothing looks exactly like a niche
+   * with no registry coverage, which is a conclusion this project has already
+   * drawn wrongly once.
+   */
+  registryDb: Pool | null
   logger: Logger
+}
+
+/** The registry pool, or a clear explanation of why there isn't one. */
+export function requireRegistryDb(deps: TaskDeps): Pool {
+  if (deps.registryDb) return deps.registryDb
+  throw new Error(
+    'registry-db is not configured. Set REGISTRY_DATABASE_URL and start the ' +
+    '`registry-db` service — the registries moved out of Supabase when the ' +
+    'free plan\'s 500 MB ceiling made whole-state slices impossible.')
 }
 
 /** Which roles run which stages. 'all' runs everything. */

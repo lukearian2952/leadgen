@@ -8,10 +8,11 @@
 // is actually loaded — the failure that made a car-wrap campaign match against
 // a med-spa slice and read as a ceiling rather than a scoping mistake.
 //
-// Instead the scope is read back out of `job_runs.detail`, which
-// `registry:ingest` already writes on every successful run. The refresh is
-// therefore definitionally "re-run what is loaded", and it needs no
-// configuration of its own and cannot drift from reality.
+// Instead the scope is read out of `registry_ingest_runs`, which
+// `registry:ingest` writes on every successful run, in the same database as the
+// entities themselves. The refresh is therefore definitionally "re-run what is
+// loaded": the scope and the rows it produced cannot get out of step, because
+// losing one loses the other.
 //
 // A state that has never been ingested is not refreshed. Adding a state is a
 // deliberate act, not something a weekly job should start doing on its own.
@@ -27,7 +28,7 @@
 
 import type { Task } from 'graphile-worker'
 import { wrapTask } from './wrap.js'
-import type { TaskDeps } from './index.js'
+import { requireRegistryDb, type TaskDeps } from './index.js'
 import { SUPPORTED_STATES } from '../sources/registry/index.js'
 
 interface Payload {
@@ -53,32 +54,24 @@ interface LastScope {
 
 export function makeRegistryRefreshTask(deps: TaskDeps): Task {
   const { db } = deps
+  const registryDb = requireRegistryDb(deps)
 
   return wrapTask<Payload>({ stage: 'registry:refresh', db }, async (payload, ctx) => {
     const wanted = new Set(
       (payload.states ?? SUPPORTED_STATES).map(s => s.toUpperCase()))
 
-    // The most recent *successful* ingest per state, and the scope it used.
-    // `distinct on` takes the newest row per state in one pass.
-    const { rows } = await db.query<{
-      state: string; name_contains: unknown; mode: string | null; finished_at: string
+    // One row per state, already the latest — `registry_ingest_runs` is keyed
+    // on state and upserted, so there is no ordering to get wrong.
+    const { rows } = await registryDb.query<{
+      state: string; name_contains: string[] | null; mode: string | null
     }>(
-      `select distinct on (detail->>'state')
-              detail->>'state'        state,
-              detail->'name_contains' name_contains,
-              detail->>'mode'         mode,
-              finished_at::text       finished_at
-         from job_runs
-        where stage = 'registry:ingest'
-          and detail->>'state' is not null
-          and coalesce((detail->>'complete')::boolean, true)
-        order by detail->>'state', finished_at desc`)
+      `select state, name_contains, mode from registry_ingest_runs`)
 
     const scopes: LastScope[] = rows
       .filter(r => wanted.has(r.state.toUpperCase()))
       .map(r => ({
         state: r.state.toUpperCase(),
-        nameContains: Array.isArray(r.name_contains) ? r.name_contains as string[] : [],
+        nameContains: Array.isArray(r.name_contains) ? r.name_contains : [],
         mode: r.mode,
       }))
       .filter(s => s.nameContains.length > 0)

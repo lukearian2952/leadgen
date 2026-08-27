@@ -14,7 +14,8 @@
 
 import type { Task } from 'graphile-worker'
 import { wrapTask } from './wrap.js'
-import type { TaskDeps } from './index.js'
+import { requireRegistryDb, type TaskDeps } from './index.js'
+import type { Pool } from 'pg'
 import { adapterFor, upsertEntities, type IngestScope, type RegistryEntity } from '../sources/registry/index.js'
 
 interface Payload {
@@ -60,14 +61,17 @@ export class RegistryBudgetExceeded extends Error {
   }
 }
 
-async function databaseMb(db: TaskDeps['db']): Promise<number> {
-  const { rows } = await db.query<{ mb: string }>(
+async function databaseMb(registryDb: Pool): Promise<number> {
+  const { rows } = await registryDb.query<{ mb: string }>(
     'select round(pg_database_size(current_database()) / 1048576.0) mb')
   return Number(rows[0]?.mb ?? 0)
 }
 
 export function makeRegistryIngestTask(deps: TaskDeps): Task {
   const { config, db } = deps
+  // Entities are written to registry-db; `db` keeps the job bookkeeping that
+  // every other stage also writes, so a run stays visible in one place.
+  const registryDb = requireRegistryDb(deps)
 
   return wrapTask<Payload>({ stage: 'registry:ingest', db }, async (payload, ctx) => {
     const state = (payload.state ?? '').toUpperCase()
@@ -94,7 +98,7 @@ export function makeRegistryIngestTask(deps: TaskDeps): Task {
     }
 
     const capMb = config.registryMaxDbMb
-    const startMb = await databaseMb(db)
+    const startMb = await databaseMb(registryDb)
     if (capMb > 0 && startMb >= capMb) {
       throw new RegistryBudgetExceeded(startMb, capMb, 0)
     }
@@ -106,7 +110,7 @@ export function makeRegistryIngestTask(deps: TaskDeps): Task {
 
     const flush = async () => {
       if (!batch.length) return
-      const stats = await upsertEntities(db, batch, upsertOptions)
+      const stats = await upsertEntities(registryDb, batch, upsertOptions)
       seen += stats.seen; written += stats.written; withPerson += stats.withPerson
       skippedAnonymous += stats.skippedAnonymous
       batch = []
@@ -115,7 +119,7 @@ export function makeRegistryIngestTask(deps: TaskDeps): Task {
       // millions of rows and the point of the ceiling is to stop before the
       // project goes read-only, not to report afterwards that it did.
       if (capMb > 0 && ++batches % SIZE_CHECK_EVERY === 0) {
-        const mb = await databaseMb(db)
+        const mb = await databaseMb(registryDb)
         ctx.logger.info('registry ingest size check', { mb, capMb, written })
         if (mb >= capMb) budgetStop = true
       }
@@ -130,9 +134,15 @@ export function makeRegistryIngestTask(deps: TaskDeps): Task {
     }
     if (!budgetStop) await flush()
 
-    const endMb = await databaseMb(db)
+    const endMb = await databaseMb(registryDb)
     ctx.cost.detail = {
-      state, adapter: adapter.name, seen, written,
+      state, adapter: adapter.name,
+      // Recorded because it was not, and its absence was a live bug: the weekly
+      // refresh read `mode` back out of this payload, found null for FL, and
+      // would have re-ingested a whole-state quarterly slice as five business
+      // days of daily filings.
+      mode: payload.mode ?? null,
+      seen, written,
       with_person: withPerson,
       skipped_anonymous: skippedAnonymous,
       person_rate: seen ? Number((withPerson / seen).toFixed(3)) : 0,
@@ -144,6 +154,26 @@ export function makeRegistryIngestTask(deps: TaskDeps): Task {
       complete: !budgetStop,
     }
     ctx.logger.info('registry ingest complete', ctx.cost.detail)
+
+    // Record the scope beside the data it describes. `registry:refresh` reads
+    // this rather than Supabase's `job_runs`, so the refresh needs exactly one
+    // connection and cannot drift from what is actually loaded.
+    await registryDb.query(
+      `insert into registry_ingest_runs
+         (state, adapter, mode, name_contains, counties,
+          seen, written, with_person, skipped_anonymous, complete, db_mb_end, finished_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+       on conflict (state) do update
+         set adapter = excluded.adapter, mode = excluded.mode,
+             name_contains = excluded.name_contains, counties = excluded.counties,
+             seen = excluded.seen, written = excluded.written,
+             with_person = excluded.with_person,
+             skipped_anonymous = excluded.skipped_anonymous,
+             complete = excluded.complete, db_mb_end = excluded.db_mb_end,
+             finished_at = now()`,
+      [state, adapter.name, payload.mode ?? null,
+       scope.nameContains ?? [], scope.counties ?? [],
+       seen, written, withPerson, skippedAnonymous, !budgetStop, endMb])
 
     if (budgetStop) throw new RegistryBudgetExceeded(endMb, capMb, written)
   })

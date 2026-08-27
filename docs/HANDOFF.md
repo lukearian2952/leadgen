@@ -13,9 +13,10 @@ proxy per business**. The engineering is not the constraint. **Yield is**, and
 **As of 2026-08-27:** registry coverage is five states and roughly doubles the
 named-rate where it reaches (§8.3); SaaS/online niches have their own
 search-based discovery (§8.7); the UI has been moved off the v1 pipeline it was
-still driving (§8.5). **The binding constraint is now Verifalia having no
-credits** (§9.2) — it has withheld the Tier A/B figure from two consecutive
-reports. Full write-ups in `docs/REPORTS/`.
+still driving (§8.5); the registries now live in their own local Postgres,
+leaving Supabase at 25 MB of 500 (§2). Verification is unblocked and the
+withheld numbers are in — **car wrap 123 → 144 sendable, SaaS 3 → 35**.
+Full write-ups in `docs/REPORTS/`.
 
 ---
 
@@ -69,9 +70,26 @@ narrative-radar, 3 Postgres, 1 Redis, nginx. Ports 22/80/443/3000/5432/5678/
 `docker compose build` (no service arg) is needed after a code change or older
 images silently keep running.
 
-### Database
-Supabase `paasggeawsoctfgqbqrd`, Postgres 17. Migrations applied through
-**`20260817000004_discovery_bytes`**:
+### Database — **two of them since 2026-08-27**
+
+**Supabase** `paasggeawsoctfgqbqrd`, Postgres 17 — campaigns, leads, businesses,
+the queue and job bookkeeping. **25 MB** of the free plan's 500 MB.
+
+**registry-db** — a local Postgres container holding `registry_entities`,
+`zip_county` and `registry_ingest_runs`. 241 MB, 304,267 entities, bounded by
+`REGISTRY_MAX_DB_MB` (20 GB) rather than by a plan.
+
+The registry moved because it was 239 MB of a 276 MB Supabase database and is
+the only table that grows without bound, while being entirely internal — no RLS
+policy references it, no Realtime subscription watches it, the frontend has
+never read it. The move reclaimed **252 MB**; Supabase went 276 MB → 24 MB.
+
+**There is no cross-database join, and there never was one.** `registry:match`
+reads a lead from Supabase, asks registry-db about it, writes the verdict back.
+`leads.registry_entity_id` is no longer a foreign key — it is provenance
+pointing into another database and may outlive the row it names.
+
+Migrations applied through **`20260827000002_registry_moves_out`**:
 
 | Migration | Adds |
 |---|---|
@@ -82,6 +100,8 @@ Supabase `paasggeawsoctfgqbqrd`, Postgres 17. Migrations applied through
 | `…0002_phase4_mailbox` | `mailbox_feedback`, `domain_patterns.source`, officers GIN index |
 | `…0003_preflight` | `preflight_runs`, `niche_calibration` |
 | `…0004_discovery_bytes` | `discovery_city_runs`, `campaigns.residential_budget_bytes` |
+| `20260827000001_start_campaign_v2` | `start_campaign_v2` / `pause_campaign_v2` RPCs |
+| `20260827000002_registry_moves_out` | drops the FK into `registry_entities` |
 
 **v1's pg_cron watchdog stays unscheduled.** `select count(*) from cron.job` = 0.
 Verify before every run — it once raced v2 and scraped 100 businesses through
@@ -459,7 +479,7 @@ is an upstream IP-specific egress filter. Evidence in
 **Consequence:** `VERIFIER=verifalia`. Revert to `hybrid` when unblocked and
 expect verify-svc to be the cheap path again.
 
-### 9.2 Verifalia is out of credits — **blocking Tier A/B** (2026-08-26)
+### 9.2 Verifalia was out of credits — **resolved 2026-08-27**
 
 `creditPacks: 3.0`, `freeCredits: 0`. A re-run of 51 newly-named leads submitted
 224 candidate addresses; **37 were verified before the credits ran out** and the
@@ -470,11 +490,20 @@ fired, the batch was marked `unavailable`, and the hybrid router tried
 verify-svc, which cannot help because port 25 is blocked upstream (§9.1). There
 is no defect here, only an empty account.
 
-**Consequence:** 26 named leads sit at `not_deliverable:unknown` for want of a
-verification credit, not for want of a deliverable mailbox. No row can reach
-Tier A until this is topped up. Re-run afterwards with
-`scripts/rematch-leads.ts` — roughly 57¢ against a 3,000¢ per-campaign cap of
-which 399¢ is spent.
+**Resolved.** Topped up to 2,503 credits; `scripts/reverify.ts` re-ran every
+lead that was named and holding no verdict. Zero remain unverified on either
+campaign. Car wrap **A+B 123 → 144** (11.8% → 13.8%), SaaS **3 → 35** (2.0% →
+23.5%), for 184¢ total.
+
+**Keep the conversion ratio: 21 of 51 new registry names became sendable — 41%.**
+A new name is worth ~0.4 of a sendable lead, and Tier B gains roughly twice what
+Tier A does, because registry names attach to catch-all and freemail domains
+more often than crawl-named ones do.
+
+**The lesson stands even though the block is gone:** `email_status = 'unknown'`
+is the *absence of a verdict*, not a statement about a mailbox, and it is
+indistinguishable at a glance from a genuine "cannot reach". Check the credit
+balance before concluding anything about a niche's deliverability.
 
 ### 9.3 Decodo traffic limit
 Exhausted once mid-phase, which invalidated a measurement and cost several

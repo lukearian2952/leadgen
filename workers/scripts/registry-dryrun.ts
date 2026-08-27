@@ -7,6 +7,29 @@ import { nicheNameTokens } from '../src/jobs/registry-ingest.js'
 import { distinctiveTokens } from '../src/lib/normalise.js'
 import { rootLogger } from '../src/logger.js'
 
+// ⚠ SUPERSEDED — predates the registry moving out of Supabase (2026-08-27).
+//
+// This script issues single statements that read `leads` and `registry_entities`
+// together. Those tables are now in different databases, so the query cannot be
+// run as written: `registry_entities` no longer exists in Supabase and `leads`
+// never existed in registry-db.
+//
+// It is kept because the reasoning in it is still the record of why the
+// statewide fallback and the NY dry run were decided the way they were. Use
+// `scripts/registry-coverage-delta.ts`, which does the same measurement across
+// both databases, or `scripts/adapter-probe.ts` for a live adapter check.
+//
+// The guard below is deliberate: a cross-database join does not error cleanly,
+// it returns nothing, and a measurement that quietly reports zero is how this
+// project has already drawn a wrong conclusion once.
+
+if (!process.env.ALLOW_SUPERSEDED_SCRIPT) {
+  throw new Error(
+    'This script predates the registry moving to registry-db and its queries ' +
+    'span two databases. Use scripts/registry-coverage-delta.ts instead, or set ' +
+    'ALLOW_SUPERSEDED_SCRIPT=1 if you have restored a combined database.')
+}
+
 const CAMPAIGN = 'fd23a9e1-a5d9-4dd7-91a1-babcc0179e96'
 const COUNTIES = ['Nassau', 'Suffolk']
 

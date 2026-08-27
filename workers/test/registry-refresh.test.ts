@@ -1,4 +1,4 @@
-// The weekly refresh reads its scope back out of `job_runs` rather than
+// The weekly refresh reads its scope back out of `registry_ingest_runs` rather than
 // carrying its own list of niche tokens.
 //
 // That is the whole point of the design, and the thing worth protecting: a
@@ -16,11 +16,14 @@ function harness(ingestRows: Row[]) {
   const added: Array<{ task: string; payload: Record<string, unknown>; opts: Record<string, unknown> }> = []
   const costDetail: { value: Record<string, unknown> } = { value: {} }
 
-  const db = {
+  // Supabase: wrapTask's own bookkeeping rows, nothing this test cares about.
+  const db = { query: vi.fn(async () => ({ rows: [] })) }
+
+  // registry-db: where the ingest scopes now live, beside the entities they
+  // describe.
+  const registryDb = {
     query: vi.fn(async (sql: string) => {
-      // `wrapTask` writes its own bookkeeping rows; only the ingest-history
-      // query matters here.
-      if (sql.includes("stage = 'registry:ingest'")) return { rows: ingestRows }
+      if (sql.includes('registry_ingest_runs')) return { rows: ingestRows }
       return { rows: [] }
     }),
   }
@@ -36,7 +39,7 @@ function harness(ingestRows: Row[]) {
     get cost() { return { set detail(v: Record<string, unknown>) { costDetail.value = v } } },
   }
 
-  return { db, ctx, added, costDetail }
+  return { db, registryDb, ctx, added, costDetail }
 }
 
 /** Call the task body directly, bypassing wrapTask's db bookkeeping. */
@@ -44,7 +47,7 @@ async function run(ingestRows: Row[], payload: Record<string, unknown> = {}) {
   const h = harness(ingestRows)
   const cost = { detail: {} as Record<string, unknown> }
   const task = makeRegistryRefreshTask({
-    db: h.db as never, config: {} as never,
+    db: h.db as never, registryDb: h.registryDb as never, config: {} as never,
   } as never)
 
   // wrapTask wraps the body; invoke through it with a stub helpers/logger.

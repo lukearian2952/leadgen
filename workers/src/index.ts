@@ -10,7 +10,7 @@ import './net.js'
 
 import { run, type Runner } from 'graphile-worker'
 import { loadConfig, degradedWarnings, ConfigError } from './config.js'
-import { createDb, assertConnectionModes, SESSION_CONNS_PER_WORKER, type Db } from './db.js'
+import { createDb, assertConnectionModes, assertRegistryDb, SESSION_CONNS_PER_WORKER, type Db } from './db.js'
 import { rootLogger } from './logger.js'
 import { startMetricsServer, metrics } from './metrics.js'
 import { buildTaskList, stagesForRole } from './jobs/index.js'
@@ -37,6 +37,8 @@ async function main() {
   // strings pointing at the pgbouncer pooler — before it turns into
   // mysteriously slow job pickup rather than a visible failure.
   await assertConnectionModes(config)
+  // Fail at boot, not once per lead across a whole campaign.
+  await assertRegistryDb(db, config)
   logger.info('DATABASE_URL_DIRECT confirmed session-mode (LISTEN/NOTIFY available)')
 
   // Before registering as a consumer: hand back anything a killed worker is
@@ -79,7 +81,7 @@ async function main() {
     // Its migrations create the graphile_worker schema on first boot.
     noHandleSignals: true,
     pollInterval: 2000,
-    taskList: buildTaskList({ config, db: db.app, logger }),
+    taskList: buildTaskList({ config, db: db.app, registryDb: db.registry, logger }),
   })
 
   healthy = true

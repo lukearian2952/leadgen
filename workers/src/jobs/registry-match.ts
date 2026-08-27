@@ -25,8 +25,9 @@
 // business is simply unmatchable — a real ceiling, not a tuning problem.
 
 import type { Task } from 'graphile-worker'
+import type { Pool } from 'pg'
 import { wrapTask, jobKey, type JobContext } from './wrap.js'
-import type { TaskDeps } from './index.js'
+import { requireRegistryDb, type TaskDeps } from './index.js'
 import { adapterFor, upsertEntities, type IngestScope } from '../sources/registry/index.js'
 import type { RegistryOfficer } from '../sources/registry/types.js'
 import { distinctiveTokens } from '../lib/normalise.js'
@@ -64,6 +65,10 @@ interface MatchRow {
 
 export function makeRegistryMatchTask(deps: TaskDeps): Task {
   const { config, db } = deps
+  // `db` is Supabase — the lead, its business, and the verdict we write back.
+  // `registryDb` is the local Postgres holding the registries. No query joins
+  // across the two, and none did before they were split.
+  const registryDb = requireRegistryDb(deps)
 
   return wrapTask<Payload>({ stage: 'registry:match', db }, async (payload, ctx) => {
     const { campaignId, leadId } = payload
@@ -81,7 +86,7 @@ export function makeRegistryMatchTask(deps: TaskDeps): Task {
     if (!lead) { ctx.logger.warn('lead vanished'); return }
 
     const state = normaliseState(lead.state)
-    const county = await resolveCounty(db, lead, state)
+    const county = await resolveCounty(registryDb, db, lead, state)
     const nameNorm = lead.name_norm || lead.business_name.toLowerCase()
 
     if (!state || !nameNorm) {
@@ -91,7 +96,7 @@ export function makeRegistryMatchTask(deps: TaskDeps): Task {
     }
 
     // ── local match ───────────────────────────────────────────────────────────
-    let best = await bestMatch(db, state, county, nameNorm, lead)
+    let best = await bestMatch(registryDb, state, county, nameNorm, lead)
     let toppedUp = false
 
     // ── top-up ────────────────────────────────────────────────────────────────
@@ -107,8 +112,8 @@ export function makeRegistryMatchTask(deps: TaskDeps): Task {
         const fetched = []
         for await (const entity of adapter.lookup(tokens, scope)) fetched.push(entity)
         if (fetched.length) {
-          await upsertEntities(db, fetched)
-          best = await bestMatch(db, state, county, nameNorm, lead)
+          await upsertEntities(registryDb, fetched)
+          best = await bestMatch(registryDb, state, county, nameNorm, lead)
         }
         ctx.logger.info('registry top-up lookup', {
           tokens, county, fetched: fetched.length, matched: Boolean(best),
@@ -121,7 +126,7 @@ export function makeRegistryMatchTask(deps: TaskDeps): Task {
       // keep: the business name is unmatchable (DBA, trade name, wrong county)
       // but the owner's own name may still be on a filing nearby.
       const reverse = await reverseLookup(
-        db, leadId, state, county, [], config.registryReverseStatewide)
+        registryDb, db, leadId, state, county, [], config.registryReverseStatewide)
       await putCandidates(db, leadId, 'registry', reverse.candidates)
       if (reverse.address) await saveAddress(db, leadId, reverse.address)
 
@@ -165,7 +170,7 @@ export function makeRegistryMatchTask(deps: TaskDeps): Task {
     }] : []
 
     const reverse = await reverseLookup(
-      db, leadId, state, county, candidates, config.registryReverseStatewide)
+      registryDb, db, leadId, state, county, candidates, config.registryReverseStatewide)
     await putCandidates(db, leadId, 'registry', [...candidates, ...reverse.candidates])
 
     await db.query(
@@ -245,7 +250,7 @@ interface ReverseResult {
 const STATEWIDE_MAX_ENTITIES = 2
 
 async function reverseLookup(
-  db: TaskDeps['db'], leadId: string, state: string, county: string,
+  registryDb: Pool, db: TaskDeps['db'], leadId: string, state: string, county: string,
   forward: readonly NameCandidate[], statewideFallback = false,
 ): Promise<ReverseResult> {
   const empty: ReverseResult = {
@@ -274,7 +279,7 @@ async function reverseLookup(
     if (forward.some(f => f.first === person.first && f.last === person.last)) continue
 
     const officerJson = JSON.stringify([{ first: person.first, last: person.last }])
-    const countyRows = (await db.query<Row>(
+    const countyRows = (await registryDb.query<Row>(
       `select id, name, county, street, city, postal_code, officers
          from registry_entities
         where state = $1
@@ -296,7 +301,7 @@ async function reverseLookup(
     // prevent, in a different disguise.
     if (!rows.length && statewideFallback) {
       statewideQueries++
-      const wide = (await db.query<Row>(
+      const wide = (await registryDb.query<Row>(
         `select id, name, county, street, city, postal_code, officers
            from registry_entities
           where state = $1 and officers @> $2::jsonb
@@ -406,7 +411,7 @@ export const GENERIC_NAME_MIN_SIMILARITY = 0.9
  *     ZIP. That rejects the remaining two.
  */
 async function bestMatch(
-  db: TaskDeps['db'], state: string, county: string, nameNorm: string, lead: LeadRow,
+  registryDb: Pool, state: string, county: string, nameNorm: string, lead: LeadRow,
 ): Promise<MatchRow | null> {
   const tokens = distinctiveTokens(lead.business_name, 3)
     .filter(t => !GENERIC_FALLBACK.has(t))
@@ -432,7 +437,7 @@ async function bestMatch(
        and $5 <> ''`
   }
 
-  const { rows } = await db.query<MatchRow>(
+  const { rows } = await registryDb.query<MatchRow>(
     `select id, name, county, postal_code, street, officers,
             similarity(name_norm, $2)::text sim
        from registry_entities
@@ -474,11 +479,13 @@ const GENERIC_FALLBACK = new Set([
  * trading precision for recall rather than dropping the lead.
  */
 async function resolveCounty(
-  db: TaskDeps['db'], lead: LeadRow, state: string,
+  registryDb: Pool, db: TaskDeps['db'], lead: LeadRow, state: string,
 ): Promise<string> {
   if (lead.county) return lead.county
   if (lead.postal_code && state) {
-    const { rows } = await db.query<{ county: string | null }>(
+    // The crosswalk moved with the registries: it is built from them, and a
+    // county it does not know is a county no registry query could use anyway.
+    const { rows } = await registryDb.query<{ county: string | null }>(
       `select county_for_zip($1,$2) county`, [lead.postal_code, state])
     if (rows[0]?.county) return rows[0].county
   }

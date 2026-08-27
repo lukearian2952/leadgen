@@ -69,6 +69,8 @@ const SPECS: VarSpec[] = [
     degrades: 'reverse officer lookup stays county-scoped (no statewide fallback)' },
   { name: 'REGISTRY_MAX_DB_MB', requiredFor: [],
     degrades: 'registry ingest runs without a database-size ceiling' },
+  { name: 'REGISTRY_DATABASE_URL', requiredFor: ['registry'],
+    degrades: 'registry lookups have no database to read' },
 
   // Mailbox construction
   { name: 'PATTERN_LADDER_EXTRAS', requiredFor: [],
@@ -147,12 +149,22 @@ export interface Config {
   /** Fall back to a statewide officer search when the county scope misses. */
   registryReverseStatewide: boolean
   /**
-   * Abort a registry ingest once `pg_database_size` reaches this many MB.
+   * Connection string for **registry-db**, the local Postgres holding
+   * `registry_entities` and `zip_county`.
    *
-   * Supabase's free plan stops at 500 MB and a project that reaches it goes
-   * read-only — which would take down the whole fleet, not just the ingest.
-   * The default leaves 100 MB of headroom for the tables an ingest does not
-   * touch. 0 disables the ceiling.
+   * Separate from `DATABASE_URL` on purpose. Supabase is on the free plan
+   * (500 MB, read-only past it) and the registry is the one table that grows
+   * without bound; it is also entirely internal — no RLS policy references it,
+   * no Realtime subscription watches it, the frontend has never read it. So it
+   * sits next to the workers instead, and lead data stays in Supabase.
+   */
+  registryDatabaseUrl: string
+  /**
+   * Abort a registry ingest once registry-db's own size reaches this many MB.
+   *
+   * The host has 122 GB free and also runs Odoo, n8n and three other Postgres
+   * instances, so this is about being a good neighbour rather than a plan
+   * limit. 0 disables the ceiling.
    */
   registryMaxDbMb: number
   /** Append the four Phase 4 extra shapes to the candidate ladder. */
@@ -258,7 +270,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     socrataAppToken:    env.SOCRATA_APP_TOKEN ?? '',
     registryReverseStatewide:
       (env.REGISTRY_REVERSE_STATEWIDE ?? '').trim().toLowerCase() === 'true',
-    registryMaxDbMb: Number(env.REGISTRY_MAX_DB_MB ?? 400),
+    registryDatabaseUrl: env.REGISTRY_DATABASE_URL ?? '',
+    registryMaxDbMb: Number(env.REGISTRY_MAX_DB_MB ?? 20_000),
     // Default off: measured on the 75-business benchmark as zero recovery for
     // 2.6x the verification spend. See EXTRA_PATTERN_ORDER in lib/patterns.ts.
     patternLadderExtras:

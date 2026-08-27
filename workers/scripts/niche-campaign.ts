@@ -11,6 +11,7 @@
 //   npx tsx scripts/niche-campaign.ts status <campaignId>
 
 import pg from 'pg'
+import { registryPool } from './_db.js'
 import { nicheNameTokens } from '../src/jobs/registry-ingest.js'
 
 // Transaction pooler: seven workers hold 14 of ~15 session slots (HANDOFF §12).
@@ -66,13 +67,37 @@ async function create(niche: string, location: string, target: number): Promise<
  * county yet.
  */
 async function countiesFromLeads(campaignId: string, state: string): Promise<string[]> {
-  const { rows } = await db.query<{ county: string }>(
-    `select distinct coalesce(nullif(l.county,''), county_for_zip(b.postal_code, $2)) county
+  // Two statements, not one. `county_for_zip` lives in registry-db now and the
+  // leads live in Supabase, so the single-statement form this used to be would
+  // not error — it would fail to resolve the function and take the whole query
+  // with it. Counties the lead already carries are resolved without asking.
+  const { rows } = await db.query<{ county: string; postal_code: string }>(
+    `select coalesce(nullif(l.county,''), '') county,
+            coalesce(b.postal_code, '') postal_code
        from leads l left join businesses b on b.id = l.business_id
-      where l.campaign_id = $1
-        and coalesce(nullif(l.county,''), county_for_zip(b.postal_code, $2)) is not null`,
-    [campaignId, state])
-  return rows.map(r => r.county).filter(Boolean)
+      where l.campaign_id = $1`,
+    [campaignId])
+
+  const counties = new Set<string>()
+  const zips = new Set<string>()
+  for (const r of rows) {
+    if (r.county) counties.add(r.county)
+    else if (r.postal_code) zips.add(r.postal_code)
+  }
+
+  if (zips.size) {
+    const registryDb = registryPool(1)
+    try {
+      const { rows: resolved } = await registryDb.query<{ county: string | null }>(
+        `select county_for_zip(z, $2) county from unnest($1::text[]) z`,
+        [[...zips], state])
+      for (const r of resolved) if (r.county) counties.add(r.county)
+    } finally {
+      await registryDb.end().catch(() => {})
+    }
+  }
+
+  return [...counties]
 }
 
 async function ingest(campaignId: string, state: string, counties: string): Promise<void> {

@@ -20,7 +20,8 @@
 //
 // Usage: npx tsx scripts/registry-coverage-delta.ts <campaignId> [--json out.json]
 
-import pg from 'pg'
+import type { Pool } from 'pg'
+import { appPool, registryPool } from './_db.js'
 import { distinctiveTokens } from '../src/lib/normalise.js'
 import { adjacentCounties } from '../src/lib/counties.js'
 
@@ -33,10 +34,10 @@ if (!campaignId) throw new Error('usage: registry-coverage-delta.ts <campaignId>
 const jsonAt = process.argv.indexOf('--json')
 const jsonOut = jsonAt > 0 ? process.argv[jsonAt + 1] : null
 
-const db = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, max: 3,
-})
+// Leads come from Supabase; every registry query goes to registry-db. There is
+// no statement here that touches both.
+const db: Pool = appPool(3)
+const registryDb: Pool = registryPool(3)
 
 // `GENERIC_FALLBACK` in registry-match.ts: tokens too common to narrow on.
 const GENERIC_FALLBACK = new Set(['llc', 'inc', 'corp', 'company', 'co', 'the'])
@@ -70,7 +71,7 @@ const { rows: leads } = await db.query<Lead>(
 console.log(`campaign ${campaignId}: ${leads.length} leads\n`)
 
 /** States the registry actually holds rows for right now. */
-const { rows: loaded } = await db.query<{ state: string; n: string }>(
+const { rows: loaded } = await registryDb.query<{ state: string; n: string }>(
   `select state, count(*) n from registry_entities group by 1 order by 1`)
 const coverage = new Map(loaded.map(r => [r.state, Number(r.n)]))
 console.log('registry_entities: ' +
@@ -119,7 +120,7 @@ for (const lead of leads) {
     for (const person of people) {
       const officerJson = JSON.stringify([{ first: person.first, last: person.last }])
       const counties = adjacentCounties(lead.state, county)
-      const { rows: countyRows } = await db.query(
+      const { rows: countyRows } = await registryDb.query(
         `select id from registry_entities
           where state = $1 and ($2::text[] = '{}' or county = any($2))
             and officers @> $3::jsonb limit 3`,
@@ -127,7 +128,7 @@ for (const lead of leads) {
 
       if (countyRows.length) { found = 'county'; row.reverseCounty++; break }
 
-      const { rows: wide } = await db.query(
+      const { rows: wide } = await registryDb.query(
         `select id from registry_entities
           where state = $1 and officers @> $2::jsonb limit $3`,
         [lead.state, officerJson, STATEWIDE_MAX_ENTITIES + 1])
@@ -192,6 +193,7 @@ if (jsonOut) {
 }
 
 await db.end()
+await registryDb.end()
 
 // ── the replayed queries ─────────────────────────────────────────────────────
 
@@ -202,7 +204,7 @@ function pct(n: number, d: number): string {
 async function resolveCounty(lead: Lead): Promise<string> {
   if (lead.county) return lead.county
   if (lead.postal_code && lead.state) {
-    const { rows } = await db.query<{ county: string | null }>(
+    const { rows } = await registryDb.query<{ county: string | null }>(
       `select county_for_zip($1,$2) county`, [lead.postal_code, lead.state])
     if (rows[0]?.county) return rows[0].county
   }
@@ -246,7 +248,7 @@ async function bestMatch(lead: Lead, county: string): Promise<MatchRow | null> {
        and $5 <> ''`
   }
 
-  const { rows } = await db.query<MatchRow>(
+  const { rows } = await registryDb.query<MatchRow>(
     `select id, officers
        from registry_entities
       where state = $1

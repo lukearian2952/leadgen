@@ -83,9 +83,28 @@ unignored `.env`.
 | Variable | Required? | Where to get it | Read by |
 |---|---|---|---|
 | `SOCRATA_APP_TOKEN` | no | evergreen.data.socrata.com/signup (free) | registry-worker |
+| `REGISTRY_DATABASE_URL` | **yes** for `registry` | docker-compose builds it: `postgres://registry:…@registry-db:5432/registry` | registry-worker |
+| `REGISTRY_DB_USER` | no (`registry`) | — | registry-db container |
+| `REGISTRY_DB_PASSWORD` | **yes** | generate: `openssl rand -base64 24` | registry-db container, registry-worker |
+| `REGISTRY_DB_NAME` | no (`registry`) | — | registry-db container |
+| `REGISTRY_MAX_DB_MB` | no (20000) | your call | registry-worker |
 
 Anonymous Socrata requests share a throttled pool. OpenCorporates has been
 dropped — its free API tier no longer exists.
+
+> **`registry_entities` and `zip_county` are not in Supabase.** They moved to a
+> local Postgres on the VPS on 2026-08-27, because Supabase's free plan stops at
+> 500 MB and the registry was 239 MB of it — and is the only table that grows
+> without bound. Nothing user-facing reads them: no RLS policy, no Realtime
+> subscription, no frontend query.
+>
+> `DATABASE_URL` and `REGISTRY_DATABASE_URL` are **not interchangeable**, and
+> there is no query that joins across them. A script that reads `leads` and
+> calls `county_for_zip` in one statement will fail — the function only exists
+> in registry-db. `scripts/_db.ts` has both pools and the reasoning.
+>
+> From the Mac, open a tunnel first:
+> `ssh -N -L 5433:127.0.0.1:5433 root@92.112.184.200`
 
 ## Verification
 

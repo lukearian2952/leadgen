@@ -159,3 +159,55 @@ SearXNG, like `proxy-meter` in front of gosom, is the honest fix.
 
 **What would overturn it.** Accounts, plus a decision about which worker to
 scale down. It is then a day's work against something testable.
+
+---
+
+## 2026-08-27 — The registries leave Supabase for a local Postgres
+
+**Decision.** `registry_entities`, `zip_county` and the new
+`registry_ingest_runs` live in **registry-db**, a Postgres container on the VPS.
+Supabase keeps everything user-facing: campaigns, leads, businesses, the queue.
+
+**Why.** Supabase stays on the free plan — 500 MB, and a project that reaches it
+goes **read-only**, taking the whole fleet down rather than one job. The registry
+was **239 MB of a 276 MB** database, and it is the only table that grows without
+bound: five states of *niche-scoped* entities is 304k rows, and whole-state
+slices across fifty states would be tens of millions. Every registry decision so
+far has been shaped by that ceiling rather than by what the data is worth.
+
+**Why it was safe to move.** The registry is entirely internal. No RLS policy
+references it, no Realtime subscription watches it, the frontend has never read
+it, and **no query joined it to a Supabase table** — `registry:match` reads a
+lead, asks the registry about it, and writes the verdict back, which is three
+statements and was always three statements. The boundary already existed; this
+made it a network hop.
+
+**Result.** Supabase 276 MB → **24 MB** (252 MB reclaimed — more than the tables
+held, because `VACUUM FULL` also compacted accumulated bloat). registry-db is
+241 MB with room to 20 GB. Row counts verified identical on both sides before
+anything was dropped: 304,267 entities and 7,643 crosswalk rows.
+
+**What it cost.**
+
+* `leads.registry_entity_id` was a **foreign key** into `registry_entities`. It
+  cannot be satisfied across databases and is now dropped. The column stays as
+  provenance; it may outlive the row it names. Found by running one
+  `registry:match` against the new database *before* dropping the old copy —
+  which is the only reason it was a migration rather than an outage.
+* Any script issuing a single statement over `leads` **and** `county_for_zip`
+  now has to do it in two steps. `niche-campaign.ts` was fixed;
+  `statewide-delta.ts` and `registry-dryrun.ts` are guarded to fail loudly
+  rather than return an empty result, because a measurement that quietly reports
+  zero is how this project has already drawn a wrong conclusion once.
+
+**Also fixed on the way.** `registry:refresh` read its per-state scope from
+`job_runs.detail.mode` — a field the ingest **never wrote**. FL would have been
+refreshed as `daily` (five business days of filings) instead of `quarterly` (the
+whole state), silently. The scope now lives in `registry_ingest_runs` beside the
+data it describes, and the ingest records `mode`.
+
+**What would overturn it.** Moving to Supabase Pro would remove the ceiling that
+forced this, but not the reasons it is better: local disk is 121 GB against
+8 GB, the round trip is a container hop rather than a pooled connection to
+us-east-1, and the registry no longer competes with lead data for a shared
+budget.
