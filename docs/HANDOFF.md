@@ -10,6 +10,13 @@ business), zero failed jobs and zero dead-letters**, at **1.47 MB of residential
 proxy per business**. The engineering is not the constraint. **Yield is**, and
 §7 says exactly where it goes.
 
+**As of 2026-08-27:** registry coverage is five states and roughly doubles the
+named-rate where it reaches (§8.3); SaaS/online niches have their own
+search-based discovery (§8.7); the UI has been moved off the v1 pipeline it was
+still driving (§8.5). **The binding constraint is now Verifalia having no
+credits** (§9.2) — it has withheld the Tier A/B figure from two consecutive
+reports. Full write-ups in `docs/REPORTS/`.
+
 ---
 
 ## 1. What the pipeline does
@@ -376,12 +383,67 @@ fallback.
 businesses and 0 on both new niches. That default is measured, and SaaS is
 exactly where it should earn its place.
 
-### 8.5 UI — nothing built this phase
-The React frontend still shows v1's campaign list and detail. Not updated for:
-tiers (it renders `gate_passed`), `name_class`/`corroboration`, the preflight
-census, per-campaign residential budget and spend, `discovery_city_runs`
-progress, or the dead-letter requeue the architecture promises. The alert banner
-component builds and is wired but **has never been seen with a live alert**.
+### 8.5 UI — rebuilt, and it was running the wrong pipeline (2026-08-27)
+
+**The finding, which mattered more than the work:** the UI's "Start Campaign"
+button called the `campaign-orchestrator` Edge Function — **v1**, Google Places
+API plus Apify, writing into the same `leads` table the worker fleet uses. All
+eight v1 functions are still ACTIVE. Every measurement in this project came from
+scripts, so nobody had pressed the button since the fleet was built.
+
+Same hazard as v1's pg_cron watchdog (§2), which could be defused by leaving it
+unscheduled. This one could not: it was the front door.
+
+Fixed by `start_campaign_v2`, a security-definer RPC that checks `auth.uid()`
+owns the campaign and enqueues `maps:discover` or `saas:discover` by niche. v2
+has no HTTP surface and the browser must not be given write access to
+`graphile_worker`. `pause_campaign_v2` also removes the queued jobs — v2 has no
+orchestrator loop to notice a status change, so status alone would have been a
+"paused" campaign running to completion.
+
+**The v1 Edge Functions remain deployed.** `campaign-export` is still the export
+path and must not be deleted. The others are one bookmark away from a v1 run.
+`docs/RUNBOOK.md` §6 carries this.
+
+Now rendered: four-way tiers, a stacked tier bar, corroboration counts,
+residential budget against spend, cost per lead, an inline census in the builder,
+a residential cap, and `completed_low_yield` explained against the census rather
+than left to read as a bug.
+
+**Still not done:** dead-letter requeue; the alert banner has never been seen
+with a live alert (Verifalia's 402s today would have been the cheapest possible
+test); Playwright needs a network this environment does not have.
+
+### 8.6 The preflight census has never been run
+
+`preflight_runs` is **empty**. The census was built and shipped as a product
+feature in `fe791d5` with 13 passing tests and has never once been executed
+against a real niche. Both UI panels added in Phase 5 therefore render only
+their no-census fallback, and the predictor has never been checked against a
+known answer.
+
+That is precisely the shape Florida's date bug had — built, asserted against the
+spec, never executed, wrong. The med spa / Long Island run is 75 businesses of
+ground truth already in the table. One census against it costs about a dollar
+and would both populate the UI and test the predictor.
+
+### 8.7 SaaS / online-niche discovery — built (2026-08-27)
+
+`saas:discover` finds online businesses through SearXNG. Measured on
+"practice management SaaS" / United States: 149 leads, **37.6% named** — twice
+the car-wrap national rate — at 0.69¢ per business and 0.05 MB of residential
+each, ~30× cheaper than a Maps campaign.
+
+**The four directories in the brief are not crawled.** G2 and Capterra serve a
+Cloudflare challenge to residential exits despite robots.txt permitting the
+pages; ProductHunt challenges its own robots.txt; YC's API answers cleanly but
+its robots is `Disallow: /`. `docs/DECISIONS.md` records the evidence. This is a
+judgement about access, not a technical limit, and it is the user's to reverse.
+
+Two things worth carrying: **registry naming does not apply to SaaS at all** —
+all 149 leads had no state, so `registry:match` ran 149 times and named zero —
+and **SERP finally earns its place** here, naming 6 of 56, against 0 on the
+earlier online niches when four of five engines were silently captcha'd.
 
 ---
 
@@ -503,3 +565,6 @@ before concluding anything about the machine.
 | `69ed85b` | Registry: OR and CT adapters, and a disk ceiling for ingest |
 | `f6981be` | Registry: fix Florida's date format, and measure the coverage gain |
 | `95e53dd` | Registry: weekly refresh, scheduled from the worker's own crontab |
+| `6e97f6a` | searxng: proxy the engine requests — four of five were captcha'd |
+| `aacd7a8` | SaaS discovery: search-based, because all four directories are closed |
+| `8744e2d` | Phase 5: point the UI at v2, show tiers, and write the runbook |
