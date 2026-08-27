@@ -1,19 +1,43 @@
 import { useState } from 'react'
-import { ExternalLink, ChevronLeft, ChevronRight, CheckCircle2 } from 'lucide-react'
-import type { Lead } from '../../lib/types'
+import { ExternalLink, ChevronLeft, ChevronRight } from 'lucide-react'
+import type { Lead, Tier } from '../../lib/types'
+import { TIER_DESCRIPTION, TIER_LABEL } from '../../lib/types'
+import { tierOf, isSendable } from '../../lib/tiers'
 import { Button } from '../ui/Button'
 
 const PAGE_SIZE = 25
 
+const TIER_STYLE: Record<Tier, string> = {
+  A: 'border-brand-500/40 bg-brand-500/10 text-brand-300',
+  B: 'border-brand-700/50 bg-brand-800/20 text-brand-400',
+  C: 'border-amber-700/40 bg-amber-900/20 text-amber-300',
+  rejected: 'border-gray-700/60 bg-gray-800/40 text-gray-500',
+}
+
+function TierBadge({ lead }: { lead: Lead }) {
+  const tier = tierOf(lead)
+  // Tier B's caveat and a rejection's reason are the useful detail; both live
+  // in reject_reason, which is set on B rows too.
+  const detail = lead.reject_reason ? `\n\nReason: ${lead.reject_reason}` : ''
+  return (
+    <span
+      className={`inline-flex shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium ${TIER_STYLE[tier]}`}
+      title={`${TIER_LABEL[tier]} — ${TIER_DESCRIPTION[tier]}${detail}`}
+    >
+      {tier === 'rejected' ? '—' : tier}
+    </span>
+  )
+}
+
 export function LeadsTable({ leads }: { leads: Lead[] }) {
   const [page, setPage] = useState(0)
   const [search, setSearch] = useState('')
-  const [ownerReadyOnly, setOwnerReadyOnly] = useState(false)
+  const [sendableOnly, setSendableOnly] = useState(false)
 
-  const ownerReadyCount = leads.filter(l => l.gate_passed).length
+  const sendableCount = leads.filter(isSendable).length
 
   const filtered = leads.filter(l => {
-    if (ownerReadyOnly && !l.gate_passed) return false
+    if (sendableOnly && !isSendable(l)) return false
     if (!search) return true
     const q = search.toLowerCase()
     return l.business_name.toLowerCase().includes(q) ||
@@ -35,11 +59,11 @@ export function LeadsTable({ leads }: { leads: Lead[] }) {
           <label className="flex cursor-pointer items-center gap-1.5 text-xs text-gray-500 hover:text-gray-300">
             <input
               type="checkbox"
-              checked={ownerReadyOnly}
-              onChange={e => { setOwnerReadyOnly(e.target.checked); setPage(0) }}
+              checked={sendableOnly}
+              onChange={e => { setSendableOnly(e.target.checked); setPage(0) }}
               className="accent-brand-500"
             />
-            Owner-ready only ({ownerReadyCount})
+            Sendable only ({sendableCount})
           </label>
         </div>
         <input
@@ -56,6 +80,7 @@ export function LeadsTable({ leads }: { leads: Lead[] }) {
           <thead>
             <tr className="border-b border-gray-800 text-left text-xs text-gray-600">
               <th className="px-4 py-3 font-medium">Business</th>
+              <th className="px-4 py-3 font-medium">Tier</th>
               <th className="px-4 py-3 font-medium">Owner</th>
               <th className="px-4 py-3 font-medium">Owner email</th>
               <th className="px-4 py-3 font-medium">City</th>
@@ -66,7 +91,7 @@ export function LeadsTable({ leads }: { leads: Lead[] }) {
           <tbody>
             {pageLeads.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-gray-600">
+                <td colSpan={7} className="px-4 py-8 text-center text-gray-600">
                   {leads.length === 0 ? 'No leads yet — scraping in progress.' : 'No results for your search.'}
                 </td>
               </tr>
@@ -74,15 +99,28 @@ export function LeadsTable({ leads }: { leads: Lead[] }) {
               pageLeads.map(lead => (
                 <tr key={lead.id} className="border-b border-gray-800/50 hover:bg-gray-800/30">
                   <td className="px-4 py-3 font-medium text-gray-200 max-w-48 truncate">
-                    <span className="flex items-center gap-1.5">
-                      {lead.gate_passed && (
-                        <CheckCircle2 size={12} className="shrink-0 text-brand-400" />
-                      )}
-                      <span className="truncate">{lead.business_name}</span>
-                    </span>
+                    <span className="truncate">{lead.business_name}</span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <TierBadge lead={lead} />
                   </td>
                   <td className="px-4 py-3 text-gray-300">
-                    {lead.owner_name || (
+                    {lead.owner_name ? (
+                      <span className="flex items-center gap-1.5">
+                        <span className="truncate">{lead.owner_name}</span>
+                        {/* Where the name came from, and whether anything agreed
+                            with it. A clinical lead only gets promoted when a
+                            second source does. */}
+                        {lead.corroboration && lead.corroboration.length > 1 && (
+                          <span
+                            className="shrink-0 rounded bg-gray-800 px-1 text-[10px] text-gray-400"
+                            title={`Corroborated by: ${lead.corroboration.join(', ')}`}
+                          >
+                            ×{lead.corroboration.length}
+                          </span>
+                        )}
+                      </span>
+                    ) : (
                       /* The reject reason is the useful thing to show when there is no owner */
                       <span className="text-gray-700" title={lead.reject_reason}>
                         {lead.reject_reason || '—'}

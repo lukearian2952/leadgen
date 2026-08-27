@@ -17,7 +17,7 @@ import { Spinner } from '../components/ui/Spinner'
 export function CampaignDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const { campaign, leads, logs, loading } = useCampaignDetail(id!)
+  const { campaign, leads, logs, loading, tiers, preflight } = useCampaignDetail(id!)
   const { alerts, acknowledge } = useAlerts(id)
   const { run, resume } = useCampaignRunner()
   const [resuming, setResuming] = useState(false)
@@ -121,7 +121,7 @@ export function CampaignDetailPage() {
 
       {/* Stats */}
       <div className="mb-6">
-        <CampaignStats campaign={campaign} />
+        <CampaignStats campaign={campaign} tiers={tiers} preflight={preflight} />
       </div>
 
       {/* Logs */}
