@@ -3,8 +3,8 @@
 **Date:** 2026-08-26
 **Queue item:** 1 — enable FL and CO, add every state with free bulk/API data,
 re-run matching over the existing 1,042 car-wrap businesses.
-**Status:** naming half **complete and measured**. Tier A/B half **blocked on
-Verifalia credits** — §6.
+**Status:** **complete.** Naming and Tier A/B both measured. The Verifalia block
+described in §6 was cleared on 2026-08-27 and the withheld numbers are in §6.1.
 
 ---
 
@@ -242,6 +242,51 @@ not an option.
 `npx tsx scripts/rematch-leads.ts 67aaaad4-c23a-44fc-9e94-e059e7470e00 /tmp/delta-after.json`.
 Estimated cost at 0.3¢ per check: ~190 remaining checks ≈ **57¢**. The
 per-campaign cap is 3,000¢ and 399¢ has been spent.
+
+---
+
+## 6.1 ✅ Resolved 2026-08-27 — the withheld numbers
+
+Credits were topped up (2,503 available) and `scripts/reverify.ts` re-ran
+`enrich:lead` for the 55 leads that were named and holding no verdict. **Zero
+rows remain unverified.**
+
+### Tier A/B, before and after, per state
+
+"Before" is exact rather than reconstructed loosely: `registry-coverage-delta.ts`
+recorded the 51 lead ids that gained a name, and every one was `rejected`
+beforehand.
+
+| state | n | Tier A → | Tier B → | A+B → | Δ |
+|---|---|---|---|---|---|
+| **FL** | 71 | 3 → **6** | 4 → **10** | 7 → **16** | **+9** |
+| **OR** | 25 | 1 → **2** | 1 → **5** | 2 → **7** | **+5** |
+| **CT** | 28 | 1 → **2** | 1 → **4** | 2 → **6** | **+4** |
+| **CO** | 49 | 5 → **7** | 2 → **3** | 7 → **10** | **+3** |
+| NY | 32 | 2 → 2 | 2 → 2 | 4 → 4 | 0 |
+| all other states | 837 | 58 → 58 | 43 → 43 | 101 → 101 | 0 |
+| **TOTAL** | **1,042** | **70 → 77** | **53 → 67** | **123 → 144** | **+21** |
+
+**Sendable rate 11.8% → 13.8%.** Tier C rose 59 → 77, which is the other half of
+the same story: of the 51 newly-named leads, 21 converted to sendable and the
+rest are named at addresses that verification says are not deliverable.
+
+**Conversion: 21 of 51 new names became sendable — 41%.** That is the number to
+carry forward for estimating what another state's registry is worth: a new name
+is worth roughly 0.4 of a sendable lead, not 1.
+
+**Cost: 78.6¢** (399¢ → 477.6¢ of the 3,000¢ cap).
+
+### Two things this changes
+
+**Tier B gained more than Tier A** — +14 against +7. Registry names arrive
+attached to businesses whose domains are catch-all or freemail more often than
+the crawl-named population does, so the registry's contribution is
+disproportionately *sendable-with-a-caveat* rather than *verified*. Worth knowing
+before promising Tier A volume from registry expansion.
+
+**NY gained nothing.** It gained one name (§3) and that name did not convert.
+NY's 41% person-rate remains the weakest of the five adapters.
 
 ---
 

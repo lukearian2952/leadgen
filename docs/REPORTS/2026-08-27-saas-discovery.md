@@ -5,8 +5,8 @@
 fallback) + SaaS discovery adapters (G2/Capterra/ProductHunt/YC via crawl; SERP
 on for online niches). Run 100 "practice management SaaS" / "United States".
 **Status:** SaaS discovery **built and run**. LinkedIn/StaffSpy **not built** —
-§5 says why, and it is not a matter of effort. Tier A/B again **capped by the
-Verifalia credit exhaustion**.
+§5 says why, and it is not a matter of effort. The Verifalia block in §6 was
+cleared on 2026-08-27; resolved numbers in §6.1.
 
 ---
 
@@ -253,6 +253,32 @@ the account is topped up. Both runs now have their most important number
 withheld for want of a few dollars of credit.
 
 Re-running afterwards costs roughly 0.3¢ per check.
+
+---
+
+## 6.1 ✅ Resolved 2026-08-27
+
+Credits topped up; 51 named-but-unverified leads re-run through `enrich:lead`.
+
+| | before | after |
+|---|---|---|
+| Tier A | 1 | **15** |
+| Tier B | 2 | **20** |
+| Tier C | 49 | 19 |
+| rejected | 97 | 95 |
+| **sendable (A+B)** | **3 (2.0%)** | **35 (23.5%)** |
+
+**Cost: 105¢** (7¢ → 112.2¢ of the 3,000¢ cap).
+
+The headline in §1 was withheld for a reason: sendable went from 2.0% to 23.5%
+on the same rows. Nothing about the leads changed — only whether anyone was able
+to ask. **23.5% sendable against the car-wrap run's 13.8%** makes this the
+better-converting niche of the two, and it is discovered at 0.05 MB of
+residential per business against 1.47 MB.
+
+That also settles §3.3's caution: with 37.6% named converting to 23.5% sendable,
+SaaS is not merely cheaper to discover — it is the higher-yield niche end to
+end.
 
 ---
 
