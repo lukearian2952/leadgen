@@ -18,5 +18,13 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"],
-  "exclude": ["dist", "node_modules"]
+  "//exclude": [
+    "frontend-tiers.test.ts imports ../../src/lib/tiers.ts, which is the React",
+    "app and therefore outside this package's rootDir. vitest runs it happily —",
+    "it resolves per-file — but tsc refuses, and the alternative was leaving the",
+    "code that decides what a customer may send to untested because the frontend",
+    "has no runner and npm install has no network. That file is typechecked by",
+    "the frontend's own `tsc -b`; only the test itself is unchecked here."
+  ],
+  "exclude": ["dist", "node_modules", "test/frontend-tiers.test.ts"]
 }

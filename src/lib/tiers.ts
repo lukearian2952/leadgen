@@ -32,6 +32,9 @@ export interface TierCounts {
   rejected: number
 }
 
+/** The four tiers, as data, so membership can be checked rather than assumed. */
+export const ALL_TIERS: readonly Tier[] = ['A', 'B', 'C', 'rejected']
+
 /**
  * Count the four tiers across a set of leads.
  *
@@ -48,7 +51,12 @@ export function countTiers(leads: Array<Pick<Lead, 'tier' | 'gate_passed'>>): Ti
     // A tier the UI does not know about must not be counted as anything. It is
     // better for a total to be short than for an unknown verdict to be
     // silently reported as sendable.
-    if (tier in counts) counts[tier]++
+    //
+    // Checked against an explicit list rather than with `in`: `in` also matches
+    // inherited keys, so a row whose tier was the string "constructor" would
+    // increment a prototype property. Far-fetched from our own writer; not
+    // far-fetched at all from a text column anyone can write to.
+    if (ALL_TIERS.includes(tier)) counts[tier]++
   }
   return counts
 }
