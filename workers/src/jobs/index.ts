@@ -19,6 +19,7 @@ import { makeEnrichLeadTask } from './enrich-lead.js'
 import { makeReconcileTask } from './reconcile.js'
 import { makeRegistryIngestTask } from './registry-ingest.js'
 import { makeRegistryMatchTask } from './registry-match.js'
+import { makeRegistryRefreshTask } from './registry-refresh.js'
 import { makeSerpOwnerTask } from './serp-owner.js'
 
 export interface TaskDeps {
@@ -33,7 +34,7 @@ const ROLE_STAGES: Record<Exclude<WorkerRole, 'all'>, string[]> = {
   serp:      ['serp:owner'],
   crawl:     ['crawl:site'],
   linkedin:  ['linkedin:company', 'linkedin:person'],
-  registry:  ['registry:match', 'registry:ingest'],
+  registry:  ['registry:match', 'registry:ingest', 'registry:refresh'],
   enrich:    ['enrich:lead'],
   verify:    ['verify:batch'],
   scheduler: ['campaign:reconcile'],
@@ -65,6 +66,8 @@ export function buildTaskList(deps: TaskDeps): TaskList {
     // with registry:match deciding whether SERP is worth buying for a lead.
     'registry:ingest':    makeRegistryIngestTask(deps),
     'registry:match':     makeRegistryMatchTask(deps),
+    // Weekly, from the crontab. Re-runs whatever slice is already loaded.
+    'registry:refresh':   makeRegistryRefreshTask(deps),
     'serp:owner':         makeSerpOwnerTask(deps),
     'enrich:lead':        makeEnrichLeadTask(deps),
     'campaign:reconcile': makeReconcileTask(deps),

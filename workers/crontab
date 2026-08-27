@@ -1,0 +1,30 @@
+# graphile-worker crontab.
+#
+# Format: minute hour day-of-month month day-of-week task ?opts {payload}
+#
+# This file is baked into the worker image, so every container loads it. That is
+# safe and deliberate: graphile-worker records each schedule's last execution in
+# `graphile_worker.known_crontabs`, so a given slot is enqueued exactly once no
+# matter how many workers are watching it. The resulting job then runs on
+# whichever worker actually registers the task — `registry:refresh` is on the
+# `registry` role only.
+#
+# `?jobKey` is not set here: registry:refresh sets its own key per state when it
+# enqueues the ingests, which is where the real de-duplication needs to happen.
+
+# ── Weekly registry refresh ──────────────────────────────────────────────────
+#
+# Sunday 03:00 UTC. Re-ingests whatever slice each state already has loaded,
+# reading the scope back out of job_runs rather than carrying its own copy.
+#
+# Sunday because FL is a 1.8 GB download and roughly fourteen minutes of
+# parsing, and this box also runs Odoo, n8n, narrative-radar and three Postgres
+# instances that have nothing to do with lead generation. States are staggered
+# 20 minutes apart by the task itself, so the whole cycle is under two hours and
+# never has two ingests writing at once — five concurrent ingests would each
+# check the database-size ceiling against a database the other four are still
+# growing, and all five could pass the check on the way past it.
+#
+# ?backfill is deliberately absent. A refresh missed because the box was down is
+# not worth running late — the next Sunday's is strictly better data.
+0 3 * * 0 registry:refresh

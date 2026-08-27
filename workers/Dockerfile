@@ -28,6 +28,10 @@ RUN apk add --no-cache openssh-client sshpass unzip
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
+# graphile-worker looks for ./crontab at boot and disables cron without it.
+# Safe to ship to every worker: `known_crontabs` makes a slot fire once
+# regardless of how many containers are watching it.
+COPY crontab ./crontab
 
 RUN addgroup -g 10001 worker && adduser -D -u 10001 -G worker worker
 USER worker
