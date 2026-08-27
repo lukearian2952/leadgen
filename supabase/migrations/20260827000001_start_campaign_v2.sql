@@ -133,7 +133,11 @@ comment on function start_campaign_v2(uuid, bigint) is
 revoke all on function start_campaign_v2(uuid, bigint) from public, anon;
 grant execute on function start_campaign_v2(uuid, bigint) to authenticated;
 
-revoke all on function discovery_stage_for_niche(text) from public;
+-- `anon` is revoked explicitly, not just via PUBLIC: Supabase grants the anon
+-- role directly through default privileges, so revoking from PUBLIC alone
+-- leaves it in place. Harmless for a pure function, but the grant should say
+-- what it means.
+revoke all on function discovery_stage_for_niche(text) from public, anon;
 grant execute on function discovery_stage_for_niche(text) to authenticated;
 
 -- ── Pause ────────────────────────────────────────────────────────────────────
