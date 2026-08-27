@@ -14,6 +14,7 @@ import type { Logger } from '../logger.js'
 import { wrapTask } from './wrap.js'
 import { makeVerifyBatchTask } from './verify-batch.js'
 import { makeMapsDiscoverTask } from './maps-discover.js'
+import { makeSaasDiscoverTask } from './saas-discover.js'
 import { makeCrawlSiteTask } from './crawl-site.js'
 import { makeEnrichLeadTask } from './enrich-lead.js'
 import { makeReconcileTask } from './reconcile.js'
@@ -30,7 +31,7 @@ export interface TaskDeps {
 
 /** Which roles run which stages. 'all' runs everything. */
 const ROLE_STAGES: Record<Exclude<WorkerRole, 'all'>, string[]> = {
-  maps:      ['maps:discover'],
+  maps:      ['maps:discover', 'saas:discover'],
   serp:      ['serp:owner'],
   crawl:     ['crawl:site'],
   linkedin:  ['linkedin:company', 'linkedin:person'],
@@ -60,6 +61,9 @@ export function buildTaskList(deps: TaskDeps): TaskList {
 
     'verify:batch':       makeVerifyBatchTask(deps),
     'maps:discover':      makeMapsDiscoverTask(deps),
+    // Discovery for niches with no storefront. Search-based; see
+    // sources/saas.ts for why the SaaS directories are not crawled.
+    'saas:discover':      makeSaasDiscoverTask(deps),
     'crawl:site':         makeCrawlSiteTask(deps),
     // Phase 3 naming stages. The chain is
     //   crawl:site → registry:match → [serp:owner] → enrich:lead
