@@ -1,0 +1,85 @@
+# SearXNG for the serp-worker.
+#
+# ── This is a template. `settings.yml` is generated from it. ─────────────────
+#
+# `infra/render-searxng-settings.sh` substitutes the proxy URL from `.env` and
+# writes `searxng/settings.yml`, which is gitignored because it then contains
+# the Decodo password. Edit this file, never the generated one, and re-render
+# after any change.
+#
+# Configured as a JSON API, not a public search page: no UI users, one caller,
+# and every query cached for 30 days in `serp_cache` so repeat campaigns cost
+# nothing.
+
+use_default_settings: true
+
+general:
+  instance_name: "leadgen-serp"
+  # No public instance, no need to advertise.
+  enable_metrics: true
+
+server:
+  # Overridden by SEARXNG_SECRET from the environment.
+  secret_key: "change-me"
+  limiter: false          # single trusted caller; the limiter would throttle us
+  image_proxy: false
+  method: "GET"
+
+search:
+  # JSON is what the worker consumes; html is kept for eyeballing a query by
+  # hand when a result set looks wrong.
+  formats:
+    - json
+    - html
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en-US"
+
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 20.0
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true
+
+  # ── Why the upstreams are proxied ──────────────────────────────────────────
+  #
+  # SearXNG makes its own outbound requests; they do not go through ProxyPool,
+  # so before this they left from the server's own IP. That IP got itself
+  # rate-limited and captcha'd, and the failure is invisible from the outside:
+  # SearXNG still answers 200 with a `results` array, just a much worse one.
+  #
+  # Measured 2026-08-26, from the JSON API's own `unresponsive_engines`:
+  #
+  #   brave       Suspended: too many requests
+  #   google cse  Suspended: too many requests
+  #   duckduckgo  CAPTCHA
+  #   startpage   Suspended: CAPTCHA
+  #
+  # Four of five engines gone, leaving Bing alone returning ten mostly
+  # dictionary results for a software query. `sources/serp.ts` predicted
+  # exactly this and named it "the thing to change first if the upstreams start
+  # returning captchas".
+  #
+  # Rotating residential, so each engine request comes from a different exit.
+  # This does mean SERP now spends residential bytes — a few hundred KB per
+  # query against a 2.5 GB per-campaign budget — where before it spent none.
+  proxies:
+    all://:
+      - __SEARXNG_OUTGOING_PROXY__
+
+engines:
+  # Discovery quality depends on Google and Bing being present; the rest are
+  # noise for our query shapes and are disabled to keep latency down.
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: wikipedia
+    disabled: true
+  - name: wikidata
+    disabled: true

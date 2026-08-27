@@ -41,3 +41,6 @@ Thumbs.db
 
 # Vitest cache (kept out of node_modules so a root-owned install cannot break it)
 workers/.vitest-cache/
+
+# Rendered from searxng/settings.template.yml; contains the Decodo password.
+searxng/settings.yml
