@@ -301,8 +301,9 @@ Island wrap run, registry named 19. Here it named 8 out of 1,042 — because
 county) and nothing else**. For businesses in the other 48 states the forward
 match and the reverse lookup had nothing to search.
 
-**So 18.5% named is a floor, not the pipeline's ceiling.** Do not read this
-run's named-rate as representative until §8.3 is done.
+**So 18.5% named is a floor, not the pipeline's ceiling.** §8.3 is now done and
+confirms it: with FL, OR and CT added and NY re-scoped, the same 1,042 rows name
+**244** rather than 193, and **43.4%** inside the five adapted states.
 
 ---
 
@@ -332,16 +333,33 @@ The question is whether later scroll pages cost the same per page while yielding
 fewer new businesses. **Until measured, run at depth 10** so cost matches the
 figures here rather than an untested one.
 
-### 8.3 Registry coverage — the highest-value open item
-NY and CO only. The FL adapter is **built and tested** (`workers/test/fl-layout.test.ts`
-asserts the 1,440-char layout against real records, including the
-`LAST`(20)+`FIRST`(14)+middle sub-fields the published spec omits and the
-per-officer P/C flag it also omits) but **has never been ingested**.
+### 8.3 Registry coverage — **done**, and measured (2026-08-26)
 
-Ingesting FL and CO properly, then adding states by population, is the cheapest
-available increase in named-rate — registry led naming on dental (22 vs 8 site)
-and tied on the Long Island wrap run (19/19). A national run currently gets
-registry naming for 2 states out of 50.
+Five states now: **NY, FL, CO, OR, CT**, 304,267 person-bearing entities.
+FL's quarterly archive is ingested; OR and CT are new adapters. Weekly
+`registry:refresh` runs Sunday 03:00 UTC from the worker crontab.
+
+Measured read-only on the 1,042-business run: named **193 → 244**
+(18.5% → 23.4%), and **18.5% → 43.4% inside the five adapted states**. §7's
+"18.5% is a floor" is now a measurement rather than a claim.
+
+The remaining ceiling is coverage, not the pipeline: those five states hold only
+205 of the 1,042 businesses. A Socrata-network-wide search returns no sixth
+free state registry with person names; CA and IL (126 businesses) are paid-only.
+Full survey in `docs/DECISIONS.md`; full numbers in
+`docs/REPORTS/2026-08-26-registry-coverage.md`.
+
+**Two things that report establishes and this file should carry forward:**
+
+* **A registry slice is niche-scoped.** NY had 95,866 rows and gained one name,
+  because those rows were ingested under *med spa* tokens and the campaign was
+  car wrap. Reusing a slice across niches silently under-matches, and looks
+  exactly like a coverage ceiling. `registry:refresh` reads its scope back out
+  of `job_runs` for this reason.
+* **Florida's dates are `mmddyyyy`.** Read as yyyymmdd, `08112026` becomes
+  "0811-20-26" — shaped like a date, wrong, and it survived a test that asserted
+  only the shape. The published spec does not state the format; this is the
+  third thing it omits, after the officer P/C flag and the name split.
 
 ### 8.4 LinkedIn + SaaS discovery — Phase 5, not started
 The `linkedin-worker` role exists and is wired but registers no tasks, and it is
@@ -379,7 +397,24 @@ is an upstream IP-specific egress filter. Evidence in
 **Consequence:** `VERIFIER=verifalia`. Revert to `hybrid` when unblocked and
 expect verify-svc to be the cheap path again.
 
-### 9.2 Decodo traffic limit
+### 9.2 Verifalia is out of credits — **blocking Tier A/B** (2026-08-26)
+
+`creditPacks: 3.0`, `freeCredits: 0`. A re-run of 51 newly-named leads submitted
+224 candidate addresses; **37 were verified before the credits ran out** and the
+rest returned HTTP 402.
+
+The system handled it correctly and loudly — `verifalia_payment_required` alerts
+fired, the batch was marked `unavailable`, and the hybrid router tried
+verify-svc, which cannot help because port 25 is blocked upstream (§9.1). There
+is no defect here, only an empty account.
+
+**Consequence:** 26 named leads sit at `not_deliverable:unknown` for want of a
+verification credit, not for want of a deliverable mailbox. No row can reach
+Tier A until this is topped up. Re-run afterwards with
+`scripts/rematch-leads.ts` — roughly 57¢ against a 3,000¢ per-campaign cap of
+which 399¢ is spent.
+
+### 9.3 Decodo traffic limit
 Exhausted once mid-phase, which invalidated a measurement and cost several
 hours (§8.1). The failure is a `407` with
 `x-error-message: … reached your current traffic limit`. **A direct CONNECT test
@@ -465,3 +500,6 @@ before concluding anything about the machine.
 | `b0c8e9b` | scripts: per-batch byte drift guard |
 | `05c8c8e` | reconcile: do not finalise while discovery is still batching |
 | `2830709` | Fix payload lookup; make the drift guard survive a false completion |
+| `69ed85b` | Registry: OR and CT adapters, and a disk ceiling for ingest |
+| `f6981be` | Registry: fix Florida's date format, and measure the coverage gain |
+| `95e53dd` | Registry: weekly refresh, scheduled from the worker's own crontab |
