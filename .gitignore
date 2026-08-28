@@ -44,3 +44,7 @@ workers/.vitest-cache/
 
 # Rendered from searxng/settings.template.yml; contains the Decodo password.
 searxng/settings.yml
+
+# Playwright
+test-results/
+playwright-report/
