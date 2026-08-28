@@ -57,6 +57,13 @@ const SPECS: VarSpec[] = [
 
   // Services
   { name: 'SEARXNG_URL',              requiredFor: ['serp'] },
+  { name: 'HUNTER_API_KEY',           requiredFor: [],
+    degrades: 'no provider mailbox lookup — a named lead whose pattern ladder ' +
+              'finds nothing stays Tier C, which is 12.5% of businesses' },
+  { name: 'MAILBOX_PROVIDER',         requiredFor: [],
+    degrades: 'provider chosen by whether HUNTER_API_KEY is set' },
+  { name: 'HUNTER_MAX_LOOKUPS_PER_CAMPAIGN', requiredFor: [],
+    degrades: 'provider lookup cap defaults to 500 per campaign' },
   { name: 'SERPER_API_KEY',           requiredFor: [],
     degrades: 'SERP runs on self-hosted SearXNG, paced to ~3.6 queries/min — the ' +
               'rate Google CSE tolerates, and the only upstream honouring site:' },
@@ -161,6 +168,11 @@ export interface Config {
   searxngMinQueryIntervalMs: number
   /** Hard per-campaign ceiling on paid SERP queries. */
   serperMaxQueriesPerCampaign: number
+  /** '' = choose by whether hunterApiKey is set; 'hunter' forces it. */
+  mailboxProvider: string
+  hunterApiKey: string
+  /** Hard per-campaign ceiling on paid mailbox lookups. */
+  hunterMaxLookupsPerCampaign: number
   crawl4aiUrl: string
   mapsScraperUrl: string
   googlePlacesApiKey: string
@@ -290,6 +302,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       Number(env.SEARXNG_MIN_QUERY_INTERVAL_MS ?? 16_700),
     serperMaxQueriesPerCampaign:
       Number(env.SERPER_MAX_QUERIES_PER_CAMPAIGN ?? 500),
+    mailboxProvider:    env.MAILBOX_PROVIDER ?? '',
+    hunterApiKey:       env.HUNTER_API_KEY ?? '',
+    hunterMaxLookupsPerCampaign:
+      Number(env.HUNTER_MAX_LOOKUPS_PER_CAMPAIGN ?? 500),
     crawl4aiUrl:        env.CRAWL4AI_URL ?? '',
     mapsScraperUrl:     env.GOOGLE_MAPS_SCRAPER_URL ?? '',
     googlePlacesApiKey: env.GOOGLE_PLACES_API_KEY ?? '',

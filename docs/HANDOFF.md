@@ -203,6 +203,8 @@ After any `.env` edit, confirm the *last* variable still reads.
 | `SERP_PROVIDER` | empty | forces `searxng` or `serper`, for an A/B without a code change |
 | `SEARXNG_MIN_QUERY_INTERVAL_MS` | 16700 | ~9 queries per 2 min is what Google CSE tolerates — §9 |
 | `SERPER_MAX_QUERIES_PER_CAMPAIGN` | 500 | Serper has no rate ceiling of its own; this is the budget |
+| `HUNTER_API_KEY` | set | provider mailbox lookup — §13.3 |
+| `HUNTER_MAX_LOOKUPS_PER_CAMPAIGN` | 500 | paid lookups are capped per campaign like verification |
 
 ### Still not set, deliberately
 - **`SOCRATA_APP_TOKEN` is accepted as permanently empty.** Every registry
@@ -213,6 +215,8 @@ After any `.env` edit, confirm the *last* variable still reads.
   to act on trains people to ignore the log it prints in.
 - **`LINKEDIN_ACCOUNTS` — and LinkedIn is not being built. §9.**
 - `SERPER_API_KEY` — unset, so SERP runs on SearXNG at its measured pace. §9.1.
+- **`GOOGLE_CSE_API_KEY` is set and dead** — 120/120 HTTP 403, the Custom Search
+  JSON API is not enabled on that project, and SearXNG never used it. §9.0.
 
 ### Credential hygiene (outstanding)
 `SUPABASE_ACCESS_TOKEN` was pasted into a chat transcript and **should be
@@ -616,6 +620,45 @@ pacing constraint and is a config change, not a worker. `SOCRATA_APP_TOKEN` is
 still empty too, and both are the same shape of fix: stop running the pipeline's
 search layer on anonymous shared quota.
 
+### 9.0 `GOOGLE_CSE_API_KEY` is dead, and it was never in the path anyway
+
+Two separate findings, either of which alone closes the idea of "raise the CSE
+pacing to the paid quota".
+
+**1. The key does not work.** Burst-tested at 1 query/second: **120 of 120
+returned HTTP 403 `PERMISSION_DENIED` — "This project does not have the access
+to Custom Search JSON API."** Not one succeeded, and not one 429. That is the
+API not being *enabled* on the project, which is upstream of billing and
+upstream of quota — enabling billing on a project where the API is switched off
+changes nothing. The keys in the repo `.env` and on the server are byte-identical.
+
+**2. Even a working key would not have touched our SERP path.** SearXNG's
+`google cse` engine — the one that answers ~9 queries and then suspends — is
+not the Custom Search JSON API. From the container's own
+`searx/engines/google_cse.py`:
+
+```
+"use_official_api": False,
+"require_api_key":  False,
+CX = "partner-pub-8993703457585266:4862972284"   # blackle.com
+resp = get(f"https://www.google.com/cse/cse.js?cx={CX}")
+```
+
+It is a **keyless scrape of a stranger's public custom-search widget**, with a
+third-party CX hardcoded into SearXNG. Our `searxng/settings.yml` sets no
+`api_key` and no `cx` anywhere, and the engine would not read them if it did.
+
+**So the ~9-query ceiling is Google throttling a scraper, not an API quota.**
+"Raising the pacing to the paid quota" would simply get that scraper blocked
+faster. `SEARXNG_MIN_QUERY_INTERVAL_MS` stays at 16700, and the Serper option
+stays in place — it is the only paid SERP path that exists, and deleting it
+while the intended replacement does not work would leave none.
+
+Reaching Google's actual paid API means enabling Custom Search JSON API on the
+project, then adding a provider that calls `googleapis.com/customsearch/v1`
+directly with our own `cx` — a new provider alongside SearXNG and Serper, not a
+pacing change to the existing one.
+
 ### 9.1 The SERP provider switch
 
 The 16.1% was measured at one lead per 50 seconds. That pacing is now part of
@@ -797,33 +840,55 @@ candidates from patterns. `PATTERN_LADDER_EXTRAS` was measured as **zero
 recovery for 2.6× the verification spend**, which says the pattern ladder is
 exhausted, not that the mailboxes do not exist.
 
-### 13.3 Projected ceiling per 100 businesses
+### 13.3 The ceiling, measured — and the 35% assumption was wrong
 
-The only unmeasured input is the provider hit rate on a named person at a known
-domain. **35% is an assumption, not a measurement** — it is the middle of what
-Hunter and Apollo claim for SMB email-finder queries, and small local trades
-will sit below it. Everything else below is measured.
+§13.3 previously projected off an **assumed** 35% provider hit rate and said to
+measure it before committing. It has been measured, and the projection was
+optimistic in two independent ways.
 
-| niche | now | Tier C /100 | + provider @35% | + SERP at speed | **projected ceiling** |
-|---|---|---|---|---|---|
-| practice mgmt SaaS | 30.9 | 16.8 | +5.9 | +3–5 | **~40** |
-| dental practice | 18.9 | 29.7 | +10.4 | — | **~29** |
-| vehicle wrap shop | 23.7 | 5.4 | +1.9 | — | **~26** |
-| med spa | 9.8 | 27.0 | +9.5 | — | **~19** |
-| car wrap | 13.9 | 8.4 | +2.9 | — | **~17** |
+**Hunter's hit rate is 24.3%, and most of it is guesswork.** Over the 189 Tier C
+leads with a name and a domain, Hunter returned an address for 46. **Only 13 of
+those 46 had `sources > 0`** — had actually been seen on a public page. The
+other 33 were inferred from the domain's pattern, which is precisely what
+`candidateLadder` already did before the lookup was bought.
 
-Globally: **16.1% → ~20–22%** sendable, on one lever.
+**Verifying the 46 through our own gate:** 9 deliverable, 29 catch-all, 8
+risky/invalid. Taken at face value that is 38 of 189 "sendable" — 20.1%, already
+well below 35%.
 
-At a 50% provider hit rate the global figure is ~22.4%; at 20% it is ~18.6%.
-**The spread between those is worth more than any other open item**, which is
-the argument for buying one month of a provider and measuring it on the 176
-before committing to anything else.
+**End-to-end it is far smaller than that.** Running the real pipeline over 60
+Tier C leads produced 8 sendable, of which **the provider's address won twice**:
+
+| | |
+|---|---|
+| `jamiefrew@carepatron.com` | `sources: 30`, not catch-all, **verified deliverable → Tier A**. A local part no ladder would ever generate |
+| `sheila.brody@greenspany.com` | `sources: 0`, catch-all domain, risky → Tier B on the concession, not on evidence |
+
+The other six were recovered by **re-running the stage at all** — see §13.7.
+
+That one comparison is the whole component. The provider is worth having exactly
+where the real mailbox does not follow a guessable pattern *and* it has been
+observed; everywhere else it re-proposes what the ladder already tried.
+`PROVIDER_MIN_SOURCES = 1` now admits only observed addresses, because an
+inferred address on a catch-all domain manufactures a Tier B row that looks like
+evidence and is a guess — the failure mode the 6.4% bounce rate taught.
+
+**Revised ceiling.** ~24% hit × ~28% observed ≈ **7% of Tier C leads** gain an
+address worth having, converting well when they do. Against 158 remaining Tier C
+businesses that is roughly **+10, or +0.7 points globally** — not the +4 to +6
+projected. Per niche the ordering is unchanged and every number is lower; the
+niche differences in hit rate (med spa 31.9%, car wrap 22.1%, SaaS 26.1%, dental
+12.5%, vehicle wrap 0/5) are on samples too small to plan against.
+
+**Measured this session: 16.1% → 17.3% sendable** (224 → 242 of 1,395), and only
+about a fifth of that gain is attributable to the provider.
 
 ### 13.4 What is left from the brief that moves the number
 
 | item | worth | verdict |
 |---|---|---|
-| **Provider lookup (Hunter/Apollo)** | **+4 to +6 pts globally, +10 in the mailbox-limited niches** | **The only large one left.** Build it |
+| **Re-running never-verified rows** | **+0.7 pts, free** — 50% of that bucket converts | **Done.** §13.7. Highest return of anything measured |
+| **Provider lookup (Hunter)** | **+0.7 pts globally, measured** — not the +4 to +6 projected | **Built.** Keep it gated on `sources > 0`; do not scale spend on it |
 | SERP at speed (`SERPER_API_KEY`) | +3–5 pts on SaaS only | Cheap, and the hypothesis is testable — §13.5 |
 | Playwright | ~13% of crawls fetch **zero** pages (180/1145 car wrap, 43/331 med spa). Some are dead sites, some are JS-only | Unmeasured. Worth one measurement, not a build |
 | LinkedIn | +14–18 sendable on SaaS, before the founder phrasing took 18 of the 93 | **No.** §9 |
@@ -845,25 +910,58 @@ have been the easy ones — but it is a specific, cheap test: run the 75 still
 unnamed SaaS businesses through Serper, where every query is a real Google
 query, and compare against the 16.1%.
 
+### 13.7 The Tier C bucket was contaminated, and clearing it beat the provider
+
+Ten per cent of Tier C was never unmailable. **20 of 201 Tier C rows had
+`verifalia_checks: 0`** — Verifalia never ran on them at all. Their
+`email_status` was `unknown`, which §8.2 already warns is *the absence of a
+verdict, not a statement about a mailbox*, and at a glance is indistinguishable
+from "cannot reach". At population scale it had quietly become 10% of the
+category the entire ceiling analysis was built on.
+
+Re-running those 20: **10 became sendable — 8 Tier A, 2 Tier B.** A 50%
+conversion rate, for no provider spend and no new capability.
+
+That is a better return than the provider produced on the same population, and
+it means **§13.2's "176 named and unmailable" was overstated**. The corrected
+figure is 158 Tier C businesses, all of which now carry a real verdict; zero
+remain unverified.
+
+**The lesson generalises past this bucket.** Any figure derived by counting rows
+in a terminal state is only as good as the guarantee that every row reached it
+for the stated reason. `email_status = 'unknown'` had no such guarantee, and
+nothing was watching for it — the watchdog re-queues `pending_verify`, which
+these rows were not. Worth a monitor: **a Tier C row with zero verification
+checks is a bug, not a result.**
+
 ### 13.6 Is the build phase done?
 
-**Yes, with one exception.**
+**Yes. Provider lookup was the last item and it is built, measured and shipped.**
 
-Everything the brief describes as machinery is built, deployed, measured and
-has survived a restart. The failures found this phase were a latent boot break,
-a query that could not use its index, and a precision guard missing from one of
-two paths — maintenance faults, not missing capability. Nothing in §13.4 except
-provider lookup is a *build*; the rest is a purchase, a measurement, or a button.
+Everything the brief describes as machinery is built, deployed, measured and has
+survived a restart. The faults found across these phases were a latent boot
+break, a query that could not use its index, a precision guard missing from one
+of two paths, and a contaminated terminal state — maintenance, not missing
+capability.
 
-The exception is real, though: **the single largest loss in the pipeline — 176
-named businesses nobody can email — is caused by a component v1 had and v2 does
-not.** That is a gap in the build, not a tuning opportunity, and it is the last
-one.
+**The ceiling is lower than §13 first projected, and the reason is worth
+keeping.** Provider lookup was sized at +4 to +6 points on an assumed 35% hit
+rate. Measured: 24.3% return an address, 28% of those are observed rather than
+inferred, and end-to-end it won twice in sixty. It is worth about **+0.7
+points** — real, cheap, and roughly what re-running twenty mislabelled rows was
+worth for free.
 
-Recommendation: **build provider lookup, measure it on the 176 before scaling,
-and treat the build phase as closed when that number is in.** Buy a Serper month
-in the same window and settle §13.5 with it. Everything else on the list is
-worth less than the measurement error on those two.
+**What that says about where the yield now is.** Every remaining lever is a
+purchase or a measurement, and the two largest things this session found were
+both *hygiene*: rows that never got a verdict, and a guard missing from a path
+nobody had exercised. The pipeline's yield is now bounded by the populations it
+runs on — 25% of car-wrap businesses name anybody at all — not by anything left
+unbuilt.
+
+Recommendation: **close the build phase.** Run the census on five to ten more
+campaigns so the preflight can finally be calibrated (§7.4), keep the provider
+gated at `sources > 0`, and treat further yield work as niche selection rather
+than engineering.
 
 ## 12. Commit history (this phase)
 
@@ -883,4 +981,5 @@ worth less than the measurement error on those two.
 | `5ffb5c1` | ui: show the census, drop the band it cannot yet support |
 | `71ae092` | docs: rewrite HANDOFF as the current-state document |
 | `9141d9b` | SERP founder phrasing, FL whole-state, and the boot break a restart found |
-| *(this)* | ZIP→county crosswalk, the SERP provider switch, and the ceiling arithmetic |
+| `019016e` | ZIP→county crosswalk, the SERP provider switch, and the ceiling arithmetic |
+| *(this)* | Provider lookup, and two measurements that were smaller than projected |

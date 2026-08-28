@@ -13,6 +13,7 @@ import type { Task } from 'graphile-worker'
 import { wrapTask, type JobContext } from './wrap.js'
 import type { TaskDeps } from './index.js'
 import { buildVerifier } from './verify-batch.js'
+import { makeMailboxProvider, type MailboxProvider } from '../sources/mailbox-provider.js'
 import type { Candidate } from '../verify/hybrid.js'
 import { assignTier, scoreCandidate, type VerifyResult } from '../verify/types.js'
 import {
@@ -51,6 +52,12 @@ interface LeadRow {
   email: string
   evidence: Record<string, unknown>
 }
+
+/**
+ * How many public pages a provider must have seen an address on before we
+ * believe it. Zero would admit the provider's guesses alongside our own.
+ */
+const PROVIDER_MIN_SOURCES = 1
 
 export function makeEnrichLeadTask(deps: TaskDeps): Task {
   const { config, db } = deps
@@ -233,14 +240,106 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
 
     const verifier = buildVerifier(config, db, ctx.logger, campaignId)
     const outcome = await verifier.verify(campaignId, candidates)
+
+    const deliverable = (rs: readonly VerifyResult[], order: readonly string[]) => {
+      for (const email of order) {
+        const r = rs.find(x => x.email === email)
+        if (r && r.status === 'safe' && !r.is_catch_all) return r
+      }
+      return undefined
+    }
+
+    // ── provider lookup ───────────────────────────────────────────────────────
+    //
+    // Bought only now, and only because the free sources and the whole pattern
+    // ladder produced nothing deliverable. This is the state 176 businesses —
+    // 12.5% of everything processed — end in, and 205 of 209 of them have no
+    // mailbox at all rather than one that failed, so the ladder is exhausted
+    // rather than unlucky.
+    //
+    // The address it returns is appended to the candidate set and verified
+    // through the same router. It does not bypass the gate and its own
+    // `verification.status` is recorded, never trusted — Hunter will happily
+    // return an address with `sources: 0`, which is a guess with better
+    // branding than ours.
+    let providerLookup: Awaited<ReturnType<MailboxProvider['find']>> = null
+    let providerName: string | null = null
+
+    if (!deliverable(outcome.results, toCheck)) {
+      const provider = makeMailboxProvider(config, ctx.logger)
+      if (provider && lead.owner_first_name && lead.owner_last_name) {
+        const { rows: [spent] } = await db.query<{ units: number }>(
+          `select coalesce(sum(units),0)::int units from source_costs
+            where campaign_id = $1 and source = 'provider_lookup'`, [campaignId])
+
+        if ((spent?.units ?? 0) >= config.hunterMaxLookupsPerCampaign) {
+          ctx.logger.warn('provider lookup cap reached for this campaign', {
+            campaignId, cap: config.hunterMaxLookupsPerCampaign, spent: spent?.units,
+          })
+        } else {
+          providerName = provider.name
+          try {
+            providerLookup = await provider.find(
+              domain, lead.owner_first_name, lead.owner_last_name)
+          } catch (err) {
+            ctx.logger.warn('provider lookup threw', { err: (err as Error).message })
+          }
+
+          // Metered whether or not it found anything: a lookup that returns
+          // nothing still costs a request, and the hit rate is the number this
+          // whole component is judged on.
+          await db.query(
+            `select add_source_cost($1,$2,$3,$4,$5,$6,$7,$8)`,
+            [campaignId, 'provider_lookup', `provider:${provider.name}`, 1, 0, 0, 0,
+             provider.centsPerLookup])
+          ctx.cost.cents += provider.centsPerLookup
+
+          // ── the sources gate ──────────────────────────────────────────────
+          //
+          // Measured before this line existed. Over 189 Tier C leads Hunter
+          // returned an address for 46 (24.3%), but only **13 of those 46 had
+          // `sources > 0`** — had actually been seen on a public page. The
+          // other 33 were inferred from the domain's pattern, which is the
+          // same thing `candidateLadder` does, and the ladder has already
+          // tried them by the time we get here.
+          //
+          // End-to-end on 60 Tier C leads the provider's address won twice.
+          // One was `jamiefrew@carepatron.com` — `sources: 30`, not
+          // catch-all, verified deliverable, and a local part no ladder would
+          // ever generate. The other was inferred, on a catch-all domain, and
+          // reached Tier B on the concession rather than on evidence.
+          //
+          // That is the whole value and the whole risk in one comparison. An
+          // inferred address on a catch-all domain manufactures a Tier B row
+          // that looks like evidence and is a guess — the failure mode the
+          // 6.4% bounce rate taught. An observed address is a fact we did not
+          // have. So only observed addresses are admitted.
+          const found = providerLookup?.email
+          const observed = (providerLookup?.sources ?? 0) >= PROVIDER_MIN_SOURCES
+
+          if (found && !observed) {
+            ctx.logger.info('provider address ignored — inferred, not observed', {
+              email: found, sources: providerLookup?.sources ?? 0,
+            })
+          }
+
+          if (found && observed && !toCheck.includes(found) && !isGenericLocalPart(found)) {
+            const extra = await verifier.verify(
+              campaignId, [{ email: found, highTrustName: highTrust }])
+            outcome.results.push(...extra.results)
+            outcome.stats.verifaliaChecks += extra.stats.verifaliaChecks
+            outcome.stats.verifySvcChecks += extra.stats.verifySvcChecks
+            outcome.stats.spendCents += extra.stats.spendCents
+            toCheck.push(found)
+          }
+        }
+      }
+    }
+
     const byEmail = new Map(outcome.results.map(r => [r.email, r]))
 
     // First `safe` wins; otherwise keep the best verdict for an honest reason.
-    let chosen: VerifyResult | undefined
-    for (const email of toCheck) {
-      const r = byEmail.get(email)
-      if (r && r.status === 'safe' && !r.is_catch_all) { chosen = r; break }
-    }
+    let chosen: VerifyResult | undefined = deliverable(outcome.results, toCheck)
     const catchAll = outcome.results.some(r => r.is_catch_all)
     if (!chosen) {
       chosen = outcome.results.find(r => r.is_catch_all)
@@ -396,6 +495,19 @@ export function makeEnrichLeadTask(deps: TaskDeps): Task {
       verifalia_checks: outcome.stats.verifaliaChecks,
       both_ran: outcome.stats.bothRan, agreed: outcome.stats.agreed,
       pattern_used: known?.pattern ?? null,
+      // The provider's hit rate is the number the whole component is judged on,
+      // so record the miss as explicitly as the hit: `provider` set with
+      // `provider_email` null is a lookup that was bought and returned nothing.
+      provider: providerName,
+      provider_email: providerLookup?.email ?? null,
+      provider_score: providerLookup?.score ?? null,
+      provider_sources: providerLookup?.sources ?? null,
+      provider_observed: providerLookup
+        ? (providerLookup.sources ?? 0) >= PROVIDER_MIN_SOURCES : null,
+      // Their verdict beside ours, on the same address. Recorded so the two can
+      // be compared later; ours is the one that gates.
+      provider_status: providerLookup?.providerStatus ?? null,
+      provider_won: Boolean(providerLookup?.email && chosen.email === providerLookup.email),
     }
   })
 }

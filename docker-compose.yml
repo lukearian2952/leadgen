@@ -57,6 +57,12 @@ x-worker-base: &worker-base
     SERP_PROVIDER: ${SERP_PROVIDER:-}
     SEARXNG_MIN_QUERY_INTERVAL_MS: ${SEARXNG_MIN_QUERY_INTERVAL_MS:-16700}
     SERPER_MAX_QUERIES_PER_CAMPAIGN: ${SERPER_MAX_QUERIES_PER_CAMPAIGN:-500}
+    # Provider mailbox lookup. Bought only when the free sources and the whole
+    # pattern ladder produce nothing deliverable — the state 12.5% of businesses
+    # end in. See workers/src/sources/mailbox-provider.ts.
+    HUNTER_API_KEY: ${HUNTER_API_KEY:-}
+    MAILBOX_PROVIDER: ${MAILBOX_PROVIDER:-}
+    HUNTER_MAX_LOOKUPS_PER_CAMPAIGN: ${HUNTER_MAX_LOOKUPS_PER_CAMPAIGN:-500}
     CRAWL4AI_URL: http://crawl4ai:11235
     GOOGLE_MAPS_SCRAPER_URL: http://maps-scraper:8080
     GOOGLE_PLACES_API_KEY: ${GOOGLE_PLACES_API_KEY}
