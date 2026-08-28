@@ -40,6 +40,7 @@ const TITLES: Record<string, string> = {
   verifalia_unauthorized: 'Verifalia rejected our credentials',
   verifier_all_ips_cooling: 'All verification IPs are cooling',
   no_verifier_available: 'No verifier is available',
+  tiered_rows_unverified: 'Some leads were tiered without being verified',
 }
 
 interface Props {

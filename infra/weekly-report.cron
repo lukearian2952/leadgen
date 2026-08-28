@@ -1,0 +1,18 @@
+# Monday ops summary.
+#
+# Install:  crontab -l | cat - infra/weekly-report.cron | crontab -
+# Verify:   crontab -l
+#
+# Monday 08:00 UTC. After Sunday 03:00's registry refresh and its staggered
+# ingests have finished (the whole cycle is under two hours) and after the 03:20
+# backup, so the report describes a settled week rather than one mid-refresh.
+#
+# Writes to /opt/leadgen/docs/REPORTS/weekly/YYYY-MM-DD.md. That path mirrors the
+# repo so the files can be brought back with a single rsync — **they do not
+# arrive in git on their own**:
+#
+#   rsync -az root@92.112.184.200:/opt/leadgen/docs/REPORTS/weekly/ docs/REPORTS/weekly/
+#
+# `flock` because a report that overruns into the next week's slot should be
+# skipped, not doubled. Output goes to a log; nobody reads root's mail on this box.
+0 8 * * 1 /usr/bin/flock -n /tmp/leadgen-weekly.lock /opt/leadgen/infra/weekly-report.sh >> /opt/leadgen/scratch/weekly-report.log 2>&1

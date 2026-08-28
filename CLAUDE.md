@@ -2,6 +2,24 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Read this first
+
+**Everything below describes the v1 Edge Function pipeline. v2 — the self-hosted
+worker fleet in `workers/` — is what actually runs.** v1's functions are still
+deployed and `campaign-export` is still the export path, but discovery,
+enrichment and verification all happen in v2 now.
+
+Start with:
+
+| document | answers |
+|---|---|
+| `docs/HANDOFF.md` | what is true right now, and why |
+| `docs/OPERATIONS.md` | how to run it |
+| `docs/RUNBOOK.md` | it broke, what now |
+| `docs/REPORTS/final-build-report.md` | what it yields and what that cost |
+
+The build phase closed 2026-08-28.
+
 ## Commands
 
 ```bash

@@ -13,6 +13,21 @@ export const ALERT_VERIFALIA_PAYMENT = 'verifalia_payment_required'
 export const ALERT_VERIFALIA_AUTH    = 'verifalia_unauthorized'
 export const ALERT_VERIFIER_COOLING  = 'verifier_all_ips_cooling'
 export const ALERT_NO_VERIFIER       = 'no_verifier_available'
+/**
+ * A lead reached a terminal tier without any verifier ever running on it.
+ *
+ * Found at population scale on 2026-08-28: 20 of 201 Tier C rows had
+ * `verifalia_checks: 0`. Their `email_status` was `unknown`, which is the
+ * *absence* of a verdict rather than a statement about a mailbox, and at a
+ * glance is indistinguishable from "we checked and could not reach it". They
+ * were counted as unmailable in every yield figure; re-running them converted
+ * **10 of 20 to sendable**, 8 of those Tier A.
+ *
+ * Nothing was watching for it. The watchdog re-queues `pending_verify`, and
+ * these rows were not that — they had been quietly finalised. A tiered row with
+ * zero verification checks is a bug, not a result.
+ */
+export const ALERT_UNVERIFIED_TIERED = 'tiered_rows_unverified'
 
 export type AlertSeverity = 'info' | 'warning' | 'error'
 

@@ -1,10 +1,20 @@
 # LeadGen v2 — Handoff
 
-State as of **2026-08-27**. Written so someone else (or me, later) can pick this
-up without re-deriving anything. `ARCHITECTURE.md` is the design, `RUNBOOK.md`
-is what to do when something breaks, `DECISIONS.md` is why things are the way
-they are, `docs/REPORTS/` holds the measurements. **This file is what is
-actually true right now.**
+State as of **2026-08-28**. Written so someone else (or me, later) can pick this
+up without re-deriving anything.
+
+| document | answers |
+|---|---|
+| **HANDOFF.md** (this) | what is true right now, and why |
+| **OPERATIONS.md** | **how to run it** — start here if you are operating, not building |
+| `RUNBOOK.md` | it broke, what now |
+| `ARCHITECTURE.md` | the design |
+| `DECISIONS.md` | why things are the way they are |
+| `REPORTS/final-build-report.md` | what it yields, what that cost, which levers moved it |
+| `REPORTS/weekly/` | what changed each week |
+
+**The build phase is closed** — see §13.6. What remains is operation, niche
+selection, and calibration.
 
 **One-line status:** the pipeline is built, measured, and proven at scale on two
 niches. Registry coverage is five states with **NY and FL loaded whole**.
@@ -215,8 +225,7 @@ After any `.env` edit, confirm the *last* variable still reads.
   to act on trains people to ignore the log it prints in.
 - **`LINKEDIN_ACCOUNTS` — and LinkedIn is not being built. §9.**
 - `SERPER_API_KEY` — unset, so SERP runs on SearXNG at its measured pace. §9.1.
-- **`GOOGLE_CSE_API_KEY` is set and dead** — 120/120 HTTP 403, the Custom Search
-  JSON API is not enabled on that project, and SearXNG never used it. §9.0.
+- **`GOOGLE_CSE_API_KEY` is set, dead, and unused.** Abandoned — §9.0.
 
 ### Credential hygiene (outstanding)
 `SUPABASE_ACCESS_TOKEN` was pasted into a chat transcript and **should be
@@ -488,6 +497,13 @@ from those points and delete `SEED_CALIBRATION`.
   quarterly date bug, since superseded by a successful whole-state ingest. A
   dead letter can now end as requeued, resolved-with-reason, or outstanding;
   before, everything looked outstanding forever.
+- **The unverified-tier monitor now exists.** `campaign:reconcile` raises
+  `tiered_rows_unverified` when a campaign finalises with leads in Tier A/B/C
+  that no verifier ever ran on — counting both `verifalia_checks` and
+  `verify_svc_checks`, and excluding `rejected`, which is rejected before
+  verification by design. This is the bug that turned out to be worth more than
+  the paid provider: 20 rows, 10 of them sendable once actually verified. It
+  reads zero across all campaigns as of 2026-08-28.
 - **The alert banner has now been seen with a live alert.**
   `scripts/alert-402-drill.ts` drives the real `VerifaliaProvider` against a
   local stub answering 402 — everything downstream of the HTTP response is
@@ -620,44 +636,30 @@ pacing constraint and is a config change, not a worker. `SOCRATA_APP_TOKEN` is
 still empty too, and both are the same shape of fix: stop running the pipeline's
 search layer on anonymous shared quota.
 
-### 9.0 `GOOGLE_CSE_API_KEY` is dead, and it was never in the path anyway
+### 9.0 Google CSE: abandoned
 
-Two separate findings, either of which alone closes the idea of "raise the CSE
-pacing to the paid quota".
+`GOOGLE_CSE_API_KEY` is set, does not work, and was never in the SERP path.
+Both halves were checked and the conclusion is closed — **do not revisit this
+without new information.**
 
-**1. The key does not work.** Burst-tested at 1 query/second: **120 of 120
-returned HTTP 403 `PERMISSION_DENIED` — "This project does not have the access
-to Custom Search JSON API."** Not one succeeded, and not one 429. That is the
-API not being *enabled* on the project, which is upstream of billing and
-upstream of quota — enabling billing on a project where the API is switched off
-changes nothing. The keys in the repo `.env` and on the server are byte-identical.
+The load-bearing fact, which is easy to rediscover the hard way: **SearXNG's
+`google cse` engine is not the Custom Search JSON API.** Its own source declares
+`use_official_api: False` and `require_api_key: False`, and it scrapes
+`google.com/cse/cse.js` using a third-party CX hardcoded into SearXNG. Our
+`settings.yml` sets no `api_key` and no `cx`, and that engine would ignore them
+if it did.
 
-**2. Even a working key would not have touched our SERP path.** SearXNG's
-`google cse` engine — the one that answers ~9 queries and then suspends — is
-not the Custom Search JSON API. From the container's own
-`searx/engines/google_cse.py`:
+**So the ~9-queries-then-suspend ceiling is Google throttling a scraper, not an
+API quota, and no key or billing change can lift it.** `SEARXNG_MIN_QUERY_INTERVAL_MS`
+stays at 16700 for that reason.
 
-```
-"use_official_api": False,
-"require_api_key":  False,
-CX = "partner-pub-8993703457585266:4862972284"   # blackle.com
-resp = get(f"https://www.google.com/cse/cse.js?cx={CX}")
-```
+Reaching Google's paid API would mean enabling Custom Search JSON API on the
+project and adding a provider that calls `googleapis.com/customsearch/v1` with
+our own `cx` — a third provider beside SearXNG and Serper, not a setting.
 
-It is a **keyless scrape of a stranger's public custom-search widget**, with a
-third-party CX hardcoded into SearXNG. Our `searxng/settings.yml` sets no
-`api_key` and no `cx` anywhere, and the engine would not read them if it did.
-
-**So the ~9-query ceiling is Google throttling a scraper, not an API quota.**
-"Raising the pacing to the paid quota" would simply get that scraper blocked
-faster. `SEARXNG_MIN_QUERY_INTERVAL_MS` stays at 16700, and the Serper option
-stays in place — it is the only paid SERP path that exists, and deleting it
-while the intended replacement does not work would leave none.
-
-Reaching Google's actual paid API means enabling Custom Search JSON API on the
-project, then adding a provider that calls `googleapis.com/customsearch/v1`
-directly with our own `cx` — a new provider alongside SearXNG and Serper, not a
-pacing change to the existing one.
+**Serper is the only paid SERP option**, and it is inert without
+`SERPER_API_KEY`: `makeSerpProvider` returns SearXNG when the key is absent, and
+warns and falls back if `SERP_PROVIDER=serper` is set without one.
 
 ### 9.1 The SERP provider switch
 
@@ -982,4 +984,5 @@ than engineering.
 | `71ae092` | docs: rewrite HANDOFF as the current-state document |
 | `9141d9b` | SERP founder phrasing, FL whole-state, and the boot break a restart found |
 | `019016e` | ZIP→county crosswalk, the SERP provider switch, and the ceiling arithmetic |
-| *(this)* | Provider lookup, and two measurements that were smaller than projected |
+| `d113f13` | Provider lookup, and two measurements that were smaller than projected |
+| *(this)* | Close the build phase: the monitor, the operator's manual, the weekly report |

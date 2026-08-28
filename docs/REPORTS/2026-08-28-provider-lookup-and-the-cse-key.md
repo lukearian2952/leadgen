@@ -4,60 +4,23 @@
 
 ---
 
-## 1. The CSE key: stop, twice over
+## 1. The CSE key: abandoned
 
-**Instruction:** burst-test `GOOGLE_CSE_API_KEY` with ~120 queries at 1/s; if it
-survives past 100, billing is active and CSE pacing can be raised to the paid
-quota.
+`GOOGLE_CSE_API_KEY` was tested and does not work — the Custom Search JSON API is
+not enabled on that project, which is upstream of billing. The idea is closed.
 
-**Result: 120 of 120 returned HTTP 403.**
+The finding worth keeping is the second one: **it would not have helped anyway.**
+SearXNG's `google cse` engine is not the Custom Search JSON API. Its own source
+declares `use_official_api: False`, `require_api_key: False`, and scrapes
+`google.com/cse/cse.js` with a third-party CX hardcoded into SearXNG. Our
+settings set no `api_key` and no `cx`.
 
-```
-status code tally:  http 403 : 120
-first non-200:      1:403
-reason:             PERMISSION_DENIED | This project does not have the access
-                    to Custom Search JSON API.
-```
+**The ~9-query ceiling is Google throttling a scraper, not an API quota.** No key
+or billing change lifts it, and raising the pacing toward a "paid quota" would
+only get the scraper blocked faster.
 
-It did not survive to 100 and it did not suspend at 100 — it never worked at
-all, from the first query. The failure is not quota and not billing: **the
-Custom Search JSON API is not enabled on that project.** Enabling billing where
-the API is switched off changes nothing. The keys in the repo `.env` and on the
-server are byte-identical, so this is not a stale copy.
-
-### The second reason, which matters more
-
-**Even a working key would not have affected our SERP path.** The engine that
-answers ~9 queries and then suspends is not the Custom Search JSON API. From the
-running container's own `searx/engines/google_cse.py`:
-
-```
-"use_official_api": False,
-"require_api_key":  False,
-CX = "partner-pub-8993703457585266:4862972284"   # blackle.com
-resp = get(f"https://www.google.com/cse/cse.js?cx={CX}")
-```
-
-It is a **keyless scrape of a stranger's public custom-search widget**, with a
-third-party CX hardcoded into SearXNG itself. Our `searxng/settings.yml` sets no
-`api_key` and no `cx` anywhere, and this engine would ignore them if it did.
-
-So the ~9-query ceiling is **Google throttling a scraper**, not an API quota, and
-raising pacing "to the paid quota" would get that scraper blocked faster.
-
-### What was not done, and why
-
-- **Pacing unchanged** at `SEARXNG_MIN_QUERY_INTERVAL_MS = 16700`.
-- **Serper was not deleted.** That instruction was premised on a working paid
-  Google path. There isn't one, and Serper is the only paid SERP option that
-  exists — removing it would leave none.
-
-Reaching Google's real paid API means enabling Custom Search JSON API on the
-project, then adding a provider that calls `googleapis.com/customsearch/v1` with
-our own `cx`. That is a new provider beside SearXNG and Serper, not a pacing
-change to the existing one, and it is a ~40-line addition once the key works.
-
----
+Pacing left at 16700 ms. Serper kept as the only paid SERP option, inert without
+a key.
 
 ## 2. Provider lookup: built, and worth about a fifth of the projection
 

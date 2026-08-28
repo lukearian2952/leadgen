@@ -19,7 +19,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
   ALERT_VERIFALIA_PAYMENT, ALERT_VERIFALIA_AUTH,
-  ALERT_VERIFIER_COOLING, ALERT_NO_VERIFIER,
+  ALERT_VERIFIER_COOLING, ALERT_NO_VERIFIER, ALERT_UNVERIFIED_TIERED,
 } from '../src/verify/alerts.js'
 
 // Read, not imported: an import would cross this package's rootDir the way
@@ -35,7 +35,7 @@ const withBanner = banner ? describe : describe.skip
 
 const KINDS = {
   ALERT_VERIFALIA_PAYMENT, ALERT_VERIFALIA_AUTH,
-  ALERT_VERIFIER_COOLING, ALERT_NO_VERIFIER,
+  ALERT_VERIFIER_COOLING, ALERT_NO_VERIFIER, ALERT_UNVERIFIED_TIERED,
 }
 
 withBanner('every alert kind the workers raise has a human title', () => {
