@@ -75,6 +75,16 @@ export class VerifaliaProvider implements VerifierProvider {
     private readonly alerts: AlertSink = new NullAlertSink(),
     /** Set so alerts can name the run they broke. */
     private readonly campaignId: string | null = null,
+    /**
+     * API root. Overridable so the 402 path can be exercised against a stub.
+     *
+     * The 402 branch is the one that took out a whole run's verification, and
+     * until now it could only be reached by actually running Verifalia out of
+     * credits — which is to say it was reachable only by the accident it exists
+     * to report. A provider whose failure path cannot be exercised on purpose
+     * is a provider whose failure path is untested.
+     */
+    private readonly baseUrl: string = VERIF_BASE,
   ) {}
 
   async available(): Promise<boolean> {
@@ -115,7 +125,7 @@ export class VerifaliaProvider implements VerifierProvider {
     for (let i = 0; i < deduped.length; i += CHUNK) {
       const chunk = deduped.slice(i, i + CHUNK)
       try {
-        const submitRes = await httpFetch(`${VERIF_BASE}/email-validations?waitTime=30000`, {
+        const submitRes = await httpFetch(`${this.baseUrl}/email-validations?waitTime=30000`, {
           method: 'POST',
           headers,
           body: JSON.stringify({ entries: chunk.map(e => ({ inputData: e })) }),
@@ -147,7 +157,7 @@ export class VerifaliaProvider implements VerifierProvider {
           const id = jobId(job)
           if (!id) break
 
-          const pollRes = await httpFetch(`${VERIF_BASE}/email-validations/${id}?waitTime=15000`, { headers })
+          const pollRes = await httpFetch(`${this.baseUrl}/email-validations/${id}?waitTime=15000`, { headers })
           if (!pollRes.ok) break
           job = await pollRes.json() as VerifaliaJob
         }

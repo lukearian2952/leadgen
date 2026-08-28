@@ -89,15 +89,32 @@ create table if not exists public.zip_county (
   state       text not null,
   county      text not null,
   weight      int  not null default 1,
+  -- 'registry' — derived from filings, the original bootstrap.
+  -- 'census'   — the Census ZCTA→county crosswalk, loaded by
+  --              scripts/zip-county-load.ts.
+  --
+  -- Both are kept. The derived rows are a record of where entities actually
+  -- file, which is occasionally the more useful answer, but they are not a
+  -- geography: a registered-agent address put 07306 (Jersey City NJ) in
+  -- Suffolk and 10996 (West Point, Orange County) in Saratoga. So census wins
+  -- when both have an opinion, and registry rows remain as the fallback for a
+  -- ZIP the crosswalk does not cover.
+  source      text not null default 'registry',
   primary key (postal_code, state, county)
 );
+
+create index if not exists zip_county_lookup
+  on public.zip_county (postal_code, state);
 
 create or replace function public.county_for_zip(p_zip text, p_state text)
 returns text language sql stable as $$
   select county from public.zip_county
    where postal_code = left(regexp_replace(coalesce(p_zip,''), '[^0-9]', '', 'g'), 5)
      and state = upper(coalesce(p_state,''))
-   order by weight desc, county
+   -- Authoritative first, then by weight. For census rows weight is the land
+   -- area of the ZIP's intersection with the county, so the majority county
+   -- wins; for registry rows it is an observation count.
+   order by (source = 'census') desc, weight desc, county
    limit 1
 $$;
 

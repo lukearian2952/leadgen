@@ -139,6 +139,7 @@ export function makeRegistryMatchTask(deps: TaskDeps): Task {
         reverse_statewide_hits: reverse.statewideHits,
         reverse_statewide_queries: reverse.statewideQueries,
         reverse_statewide_ambiguous: reverse.statewideAmbiguous,
+        reverse_county_ambiguous: reverse.countyAmbiguous,
       }
       return finishStage(ctx, db, campaignId, leadId)
     }
@@ -192,6 +193,7 @@ export function makeRegistryMatchTask(deps: TaskDeps): Task {
       reverse_statewide_hits: reverse.statewideHits,
       reverse_statewide_queries: reverse.statewideQueries,
       reverse_statewide_ambiguous: reverse.statewideAmbiguous,
+      reverse_county_ambiguous: reverse.countyAmbiguous,
     }
 
     return finishStage(ctx, db, campaignId, leadId)
@@ -211,6 +213,8 @@ interface ReverseResult {
   statewideQueries: number
   /** Statewide candidates rejected as too common a name to be evidence. */
   statewideAmbiguous: number
+  /** County candidates rejected for the same reason. Dense counties produce these. */
+  countyAmbiguous: number
 }
 
 /**
@@ -239,15 +243,29 @@ interface ReverseResult {
  * address for the business, which the Maps listing does not always give.
  */
 /**
- * How many entities statewide may share an officer name before the match stops
- * being evidence.
+ * How many entities may share an officer name before the match stops being
+ * evidence. Applies to both scopes.
  *
- * The county scope is what keeps a full-name match meaningful. Dropping it
- * trades precision for recall, and "John Smith is an officer of one of the 40
- * entities called that in New York" identifies nobody. One or two entities is a
- * person; more than that is a common name.
+ * "John Smith is an officer of one of the 40 entities called that in New York"
+ * identifies nobody. One or two entities is a person; more than that is a
+ * common name.
+ *
+ * ── why the county scope needs this too ──────────────────────────────────────
+ *
+ * It originally guarded only the statewide fallback, on the reasoning that "the
+ * county scope is what keeps a full-name match meaningful". That reasoning is
+ * sound for the counties it was written against — NY's, where a county is a few
+ * tens of thousands of entities — and it does not survive Florida.
+ * Miami-Dade alone returns **200+** entities for `Maria Rodriguez` and 200+ for
+ * `Jose Garcia`: county-scoped, and no narrower than statewide for a common
+ * name. The county path then took `rows[0]` of an arbitrary three.
+ *
+ * Measured cost of extending the guard: 3 of 27 existing reverse candidates,
+ * all of them the ones where three entities matched and `limit 3` meant we
+ * could not tell whether it was three or three hundred. That is the right trade
+ * for output that gets emailed at a named human.
  */
-const STATEWIDE_MAX_ENTITIES = 2
+const MAX_SHARED_ENTITIES = 2
 
 async function reverseLookup(
   registryDb: Pool, db: TaskDeps['db'], leadId: string, state: string, county: string,
@@ -256,6 +274,7 @@ async function reverseLookup(
   const empty: ReverseResult = {
     checked: 0, candidates: [], address: null,
     countyHits: 0, statewideHits: 0, statewideQueries: 0, statewideAmbiguous: 0,
+    countyAmbiguous: 0,
   }
   if (!state) return empty
 
@@ -267,6 +286,7 @@ async function reverseLookup(
   const out: NameCandidate[] = []
   let address: ReverseResult['address'] = null
   let countyHits = 0, statewideHits = 0, statewideQueries = 0, statewideAmbiguous = 0
+  let countyAmbiguous = 0
 
   type Row = {
     id: string; name: string; county: string
@@ -279,22 +299,51 @@ async function reverseLookup(
     if (forward.some(f => f.first === person.first && f.last === person.last)) continue
 
     const officerJson = JSON.stringify([{ first: person.first, last: person.last }])
+    // ── why the county test has three branches ────────────────────────────────
+    //
+    // `officers @> …` is the driver and it is served by
+    // `registry_entities_officers_gin`; a specific first+last matches a handful
+    // of rows out of eleven million. County is only a filter applied to those,
+    // which is what makes the third branch affordable.
+    //
+    // That third branch exists because a registry can publish an address
+    // without publishing a county. Sunbiz does: all 11,031,417 Florida entities
+    // carry a city and a ZIP and none carries a county. The forward query has
+    // always allowed for this (`county = '' or county = $3`); this one did not,
+    // and the omission was invisible while `zip_county` had no Florida rows —
+    // the lead's county came back empty too, `counties` was `{}`, and the whole
+    // filter was skipped. That silently made every Florida reverse lookup an
+    // unscoped statewide search of the largest registry we hold, without the
+    // MAX_SHARED_ENTITIES ambiguity guard, which at the time the county path
+    // did not apply at all.
+    //
+    // Loading the census crosswalk fixed the lead side and would have broken
+    // this one the other way: leads would resolve to "Miami-Dade" and every
+    // Florida entity would fail `county = any($2)`, taking reverse from
+    // wrongly-broad to zero. Resolving the entity's county from its ZIP at
+    // query time keeps both ends honest and costs one crosswalk lookup per
+    // matched row, not a backfill of eleven million.
     const countyRows = (await registryDb.query<Row>(
       `select id, name, county, street, city, postal_code, officers
          from registry_entities
         where state = $1
-          and ($2::text[] = '{}' or county = any($2))
           and officers @> $3::jsonb
-        limit 3`,
-      [state, counties, officerJson])).rows
+          and ($2::text[] = '{}'
+               or county = any($2)
+               or (county = '' and county_for_zip(postal_code, $1) = any($2)))
+        limit $4`,
+      [state, counties, officerJson, MAX_SHARED_ENTITIES + 1])).rows
 
-    let rows = countyRows
+    // Same rule as the statewide fallback below: too many holders of one name
+    // is a common name, not an identification.
+    let rows = countyRows.length <= MAX_SHARED_ENTITIES ? countyRows : []
+    if (countyRows.length > MAX_SHARED_ENTITIES) countyAmbiguous++
     let viaStatewide = false
 
     // ── statewide fallback ────────────────────────────────────────────────────
     //
     // Only when the county scope missed, because it is strictly wider and would
-    // otherwise mask the county result. Bounded by STATEWIDE_MAX_ENTITIES: a
+    // otherwise mask the county result. Bounded by MAX_SHARED_ENTITIES: a
     // name held by three or more entities across the state is a common name,
     // not an identification, and admitting it would attach a real person to the
     // wrong business — the exact failure the Phase 3 trigram guard exists to
@@ -306,9 +355,9 @@ async function reverseLookup(
            from registry_entities
           where state = $1 and officers @> $2::jsonb
           limit $3`,
-        [state, officerJson, STATEWIDE_MAX_ENTITIES + 1])).rows
+        [state, officerJson, MAX_SHARED_ENTITIES + 1])).rows
 
-      if (wide.length && wide.length <= STATEWIDE_MAX_ENTITIES) {
+      if (wide.length && wide.length <= MAX_SHARED_ENTITIES) {
         rows = wide
         viaStatewide = true
       } else if (wide.length) {
@@ -348,7 +397,7 @@ async function reverseLookup(
 
   return {
     checked: people.length, candidates: out, address,
-    countyHits, statewideHits, statewideQueries, statewideAmbiguous,
+    countyHits, statewideHits, statewideQueries, statewideAmbiguous, countyAmbiguous,
   }
 }
 

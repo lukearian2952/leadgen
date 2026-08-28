@@ -33,6 +33,7 @@
 
 import type { Pool } from 'pg'
 import type { Logger } from '../logger.js'
+import type { SerpProvider } from './serp-provider.js'
 import { SerpSource, type SerpResult } from './serp.js'
 import { extractDomain, isJunkDomain } from '../lib/identity.js'
 
@@ -308,7 +309,7 @@ export class SaasDiscovery {
 
 /** Convenience for callers that already have a pool and logger. */
 export function makeSaasDiscovery(
-  searxngUrl: string, db: Pool, logger: Logger,
+  provider: SerpProvider, db: Pool, logger: Logger,
 ): SaasDiscovery {
-  return new SaasDiscovery(new SerpSource(searxngUrl, db, logger), logger)
+  return new SaasDiscovery(new SerpSource(provider, db, logger), logger)
 }

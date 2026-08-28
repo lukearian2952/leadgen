@@ -17,9 +17,14 @@ phrasing took the SaaS cohort from 0 candidates in 93 to 15, inside the 15–20%
 band §9 set as the do-not-build threshold. The remaining SERP ceiling is
 infrastructural rather than linguistic — see §9.
 
-**Next action:** a FL ZIP→county table and a `registry_entities.county` backfill
-for Florida. FL whole-state delivered its forward matches and **none** of the
-reverse direction, which was 28% of NY's — §5.1.
+**FL reverse is now enabled and the yield delta was zero — §5.1a.** The census
+ZIP→county crosswalk is loaded for all 56 states and Florida's leads resolve a
+county, but reverse lookup runs only on people the *crawl* named, and the crawl
+names a first+last on 5 of 71 FL leads. County was never the binding constraint;
+crawl naming is.
+
+**Next action:** none of the remaining registry work moves the number much —
+§13 has the ceiling arithmetic and what is left that does.
 
 ---
 
@@ -93,6 +98,15 @@ contacts, the graphile queue, `job_runs`, alerts, `preflight_runs`.
 `zip_county`, `county_for_zip` and `registry_ingest_runs`.
 **9,930 MB · 12,606,482 entities** after Florida was loaded whole. Bounded by
 `REGISTRY_MAX_DB_MB` (20 GB) rather than by a plan.
+
+`zip_county` now carries two kinds of row, distinguished by `source`:
+**46,960 `census`** rows from the Census ZCTA→county crosswalk covering 56
+states and territories, and 81,763 `registry` rows derived from filings.
+`county_for_zip` prefers census. The derived rows were the only source before
+and they are a filing address rather than a geography — they put 07306 (Jersey
+City NJ) in Suffolk, 10996 (West Point, Orange County) in Saratoga and 27603
+(Raleigh NC) in the Bronx. They are kept as the fallback for a ZIP the
+crosswalk does not cover. `scripts/zip-county-load.ts` reloads it.
 
 The registry moved out on 2026-08-27 because it was 239 MB of a 276 MB Supabase
 database and is the only table that grows without bound, while being entirely
@@ -185,12 +199,20 @@ After any `.env` edit, confirm the *last* variable still reads.
 | `REGISTRY_MAX_DB_MB` | 20000 | registry-db's own size; a good-neighbour limit, not a plan limit |
 | `STALE_LOCK_MINUTES` | 60 (floor 50) | must exceed the longest job |
 | `VERIFIER` | `verifalia` | port 25 is blocked upstream — §8.1 |
+| `SERPER_API_KEY` | empty | empty selects SearXNG; setting it selects Serper — §9.1 |
+| `SERP_PROVIDER` | empty | forces `searxng` or `serper`, for an A/B without a code change |
+| `SEARXNG_MIN_QUERY_INTERVAL_MS` | 16700 | ~9 queries per 2 min is what Google CSE tolerates — §9 |
+| `SERPER_MAX_QUERIES_PER_CAMPAIGN` | 500 | Serper has no rate ceiling of its own; this is the budget |
 
-### Still not set
-- **`SOCRATA_APP_TOKEN` is empty.** Every registry ingest has run on the shared
-  anonymous pool: it completes, but slower and with retry backoff. Free from
-  `evergreen.data.socrata.com/signup`. NY whole-state took 31 minutes on it.
-- `LINKEDIN_ACCOUNTS` — see §9.
+### Still not set, deliberately
+- **`SOCRATA_APP_TOKEN` is accepted as permanently empty.** Every registry
+  ingest has run on the shared anonymous pool and every one has completed, NY
+  whole-state included (31 minutes, 4.27M rows). It is slower and it can 429
+  into the adapter's retry backoff — a throughput fact, not a fault. **The boot
+  and per-ingest warnings for it have been removed**: a warning nobody intends
+  to act on trains people to ignore the log it prints in.
+- **`LINKEDIN_ACCOUNTS` — and LinkedIn is not being built. §9.**
+- `SERPER_API_KEY` — unset, so SERP runs on SearXNG at its measured pace. §9.1.
 
 ### Credential hygiene (outstanding)
 `SUPABASE_ACCESS_TOKEN` was pasted into a chat transcript and **should be
@@ -243,18 +265,71 @@ The reverse direction is **28% of all matches** once a state is loaded whole.
 Whole-state coverage changes *what the pipeline can do*, not just how much it
 finds.
 
-### 5.1a Florida gets the forward half only — and this is the top follow-up
+### 5.1a Florida reverse: enabled, and worth nothing — the constraint was elsewhere
 
-FL whole-state contributed **0 reverse matches, and structurally could not**.
-`zip_county` holds only **NY and OR**, and all 11,031,417 Florida entities have
-`county = ''` — Sunbiz carries city and ZIP, not county, and nothing backfills
-it. The reverse direction keys on county, so it has no input.
+Florida contributed **0 reverse matches** after being loaded whole, and the
+diagnosis at the time was that it structurally could not: `zip_county` held only
+NY and OR, and all 11,031,417 FL entities have `county = ''` because Sunbiz
+publishes city and ZIP but no county.
 
-Florida therefore bought the forward 72% of what NY's whole-state load bought,
-and none of the remaining 28%. **A FL ZIP→county table plus a backfill of
-`registry_entities.county` is the highest-value registry work available**: the
-11M rows are already loaded and 99.8% of them carry a ZIP, so it is a join, not
-another ingest.
+That diagnosis was half right, and acting on it is what showed which half.
+
+**What was fixed.** The Census ZCTA→county crosswalk is loaded for all 56 states
+(§2), so a Florida lead now resolves a county — **0 → 45 of 71 leads carry one**.
+And `reverseLookup`'s entity-side filter gained a third branch that resolves an
+entity's county from its ZIP when the registry omitted it. That second half is
+not optional: the crosswalk alone would have made things *worse*, because leads
+would start resolving to "Miami-Dade" while every Florida entity still failed
+`county = any($2)`, taking reverse from wrongly-broad to exactly zero.
+
+It costs nothing at query time. `officers @> …` is the driver and is served by
+the GIN index — a specific first+last matches a handful of rows out of eleven
+million — so the crosswalk is consulted for those few, not for the table.
+Measured at **190 ms**. **A backfill of `registry_entities.county` is therefore
+an optimisation, not a correctness fix**, and an expensive one: every row update
+rewrites all seven indexes including two GIN, which measured at ~5,500 rows/min
+against a 2 GB container and 512 MB of shared buffers — 30 hours for 10.4M rows.
+`scripts/registry-county-backfill.ts` exists and works; roughly 400k FL rows are
+done. There is no reason to finish it.
+
+**The delta was zero.** FL stayed at 47 named and 20 sendable. The reason is not
+county at all:
+
+| | n |
+|---|---|
+| FL leads | 71 |
+| crawled | 71 |
+| with any name candidate | 47 |
+| **with a `site_crawl` candidate carrying first *and* last** | **5** |
+| people reverse actually looked up | 8 |
+| reverse hits | 1 |
+
+**Reverse lookup only runs on people the crawl named.** It asks "is this person
+an officer of an entity near here", so a lead with no crawl-named person has
+nothing to ask about. Five of seventy-one had one. That is the ceiling on the
+reverse direction for this niche, and no amount of registry coverage moves it.
+
+The one hit was *High Tide Graphics* in **Volusia** — a small county, which is
+exactly where the county-scope assumption holds.
+
+### 5.1b A precision bug Florida exposed, in every state
+
+The reverse lookup's ambiguity guard applied only to the statewide fallback,
+reasoning that "the county scope is what keeps a full-name match meaningful".
+True of NY's counties. Not true of Miami-Dade, which returns **200+** entities
+for `Maria Rodriguez` and 200+ for `Jose Garcia` — county-scoped, and no
+narrower than statewide for a common name. The county path then took `rows[0]`
+of an arbitrary three, with `limit 3` making "three" and "three hundred"
+indistinguishable.
+
+It had not yet produced a wrong name only because the dense-county leads had no
+crawl-named people to look up. It would have at scale.
+
+`STATEWIDE_MAX_ENTITIES` is now `MAX_SHARED_ENTITIES` and both scopes apply it.
+Re-running every lead holding a reverse-derived candidate: **5 county candidates
+rejected as too-common**, 29 hits from 69 people checked, and **sendable
+unchanged at 224** — the rejected five were not the winning name on any lead. A
+precision fix that cost no yield.
 
 ### 5.2 Multipliers, for estimating what another state is worth
 
@@ -348,11 +423,19 @@ upstream, comparing row yield and not only bytes.**
 10**. Depth cuts rows and bytes together, so it is not obviously a win on the
 ratio. **Until measured, run at depth 10.**
 
-### 7.3 SERP residential bytes are unmetered
-SearXNG proxies internally, so its residential usage never passes through
-`ProxyPool` and is not counted. The 2.5 GB per-campaign budget is enforced
-against an undercount. Small today (~15 queries per campaign); the honest fix is
-a meter in front of SearXNG like `proxy-meter` in front of gosom.
+### 7.3 SERP is metered now — partially
+`serp:owner` and `enrich:lead`'s address query both write a **`serp_queries`**
+row to `source_costs`, stage `serp:<provider>`, carrying the live query count
+(cached queries excluded), the response bytes and the per-query cost. Verified
+live: `units 2, proxy_bytes 10736, serp:searxng`. Two rows per campaign on
+purpose — `serp` counts *leads* and carries the model cost, `serp_queries`
+counts *queries* and carries the transport, because one lead is three queries
+and the paid-provider cap is a query budget.
+
+**Still not counted:** SearXNG's own upstream requests, which egress through
+Decodo without passing `ProxyPool`. What is metered is what the worker received.
+The honest fix remains a meter in front of SearXNG like `proxy-meter` in front
+of gosom.
 
 ### 7.4 The preflight ships as a census, not a predictor
 **Run for the first time 2026-08-27.** There was no `preflight:*` job and never
@@ -392,9 +475,24 @@ from those points and delete `SEED_CALIBRATION`.
 
 ### 7.5 Smaller, still open
 - **Dead-letter requeue in the UI** — the architecture promises it; there is no
-  button. `dead_letter` is currently empty.
-- **The alert banner has never been seen with a live alert.** It builds and is
-  wired. Verifalia's 402s would have been the cheapest possible test.
+  button. **`dead_letter` was never empty**, which this file claimed: three rows
+  had sat there since 17 and 26 August. All three are now closed out with a
+  written reason via the new `resolution` column
+  (`20260828000001_dead_letter_resolution.sql`), and **0 are outstanding**. Two
+  were the depth-5 Maps measurements killed by the old fixed 20-minute cap —
+  which is the recorded reason §7.2 says "never measured" — and one was the FL
+  quarterly date bug, since superseded by a successful whole-state ingest. A
+  dead letter can now end as requeued, resolved-with-reason, or outstanding;
+  before, everything looked outstanding forever.
+- **The alert banner has now been seen with a live alert.**
+  `scripts/alert-402-drill.ts` drives the real `VerifaliaProvider` against a
+  local stub answering 402 — everything downstream of the HTTP response is
+  production code — and confirms the row is open, carries
+  `verifalia_payment_required` / `error`, is returned by exactly the predicate
+  `useAlerts` uses, and that `alerts` is in the `supabase_realtime` publication
+  so the banner appears without a reload. `raise_alert` deduped a second firing
+  into `occurrences: 2` rather than a second row. `--clear` acknowledges it and
+  deletes the drill campaign.
 - **Playwright** — the brief names it; it needs a browser download and network.
 - **`%SIGN%` matches `DESIGN`**, inflating every niche-scoped slice with design
   firms. Costs storage, not precision (the trigram floor still applies). Worth a
@@ -518,6 +616,31 @@ pacing constraint and is a config change, not a worker. `SOCRATA_APP_TOKEN` is
 still empty too, and both are the same shape of fix: stop running the pipeline's
 search layer on anonymous shared quota.
 
+### 9.1 The SERP provider switch
+
+The 16.1% was measured at one lead per 50 seconds. That pacing is now part of
+the system rather than a property of the script that happened to run it:
+`sources/serp-provider.ts` puts SearXNG and Serper behind one interface, and
+`SerpSource` takes a provider rather than a URL.
+
+| | SearXNG | Serper |
+|---|---|---|
+| selected when | `SERPER_API_KEY` empty | key present |
+| pacing | 16.7 s between queries, process-wide | none |
+| cost | free | ~0.1¢/query |
+| cap | none (paced instead) | `SERPER_MAX_QUERIES_PER_CAMPAIGN`, default 500 |
+
+The pacer chains on a shared promise rather than sleeping inside a job, because
+`serp:owner` runs at `WORKER_CONCURRENCY` and five parallel sleeps produce five
+times the intended rate. Only serp-worker registers the stage, so one process is
+the whole fleet for this purpose.
+
+The cap reads `source_costs` where `source = 'serp_queries'`, the same row the
+meter writes, so the budget and the spend cannot disagree.
+
+**Adding the key is the whole migration and removing it is the whole rollback.**
+`SERP_PROVIDER` forces either one for an A/B on the same box.
+
 ## 10. Operational traps — each of these cost real time
 
 1. **Never restart a worker while `maps:discover` is in flight.** graphile holds
@@ -557,7 +680,21 @@ search layer on anonymous shared quota.
 11. **A SERP result taken from a burst run is not a measurement.** Google CSE is
     the only upstream honouring `site:`, and it answers ~9 queries before a ~2
     minute suspension; Bing answers anyway, discarding the operator. Check the
-    engine mix in `serp_cache` before drawing a conclusion — §9.
+    engine mix in `serp_cache` before drawing a conclusion — §9. The pacing is
+    enforced in `serp-provider.ts` now, so this bites only if someone raises
+    `SEARXNG_MIN_QUERY_INTERVAL_MS` or calls the source directly.
+12. **An `update` whose predicate wraps the indexed column in a function does
+    not use the index.** The FL county backfill compared
+    `left(regexp_replace(postal_code,…),5) = $2` against an index on
+    `(state, postal_code)` and sequentially scanned 11M rows 1,174 times — 44 s
+    each, 14 hours. Plain equality on the 98.2% of codes that are already five
+    characters, plus one mop-up pass, is minutes. `explain` the statement before
+    launching anything that runs a thousand times.
+13. **Row updates on `registry_entities` are expensive out of proportion to the
+    column changed.** Seven indexes including two GIN, a 2 GB container and
+    512 MB of shared buffers against a 9.9 GB table: ~5,500 rows/min regardless
+    of how small the update is. Prefer resolving at query time over
+    denormalising — §5.1a is the worked example.
 
 ---
 
@@ -608,6 +745,126 @@ any of it.
 
 ---
 
+## 13. The sendable ceiling, and whether the build phase is done
+
+Measured on **1,395 unique businesses**, deduplicated by business across
+campaigns (the SaaS experiment replayed 93 businesses that already existed, and
+counting both would inflate every rate).
+
+### 13.1 Where each niche actually loses
+
+`sendable% = naming% × mailbox-conversion%`, and the two factors fail
+independently:
+
+| niche | businesses | named | **naming** | sendable | **mailbox conv** | **sendable%** |
+|---|---|---|---|---|---|---|
+| car wrap | 921 | 234 | 25.4% | 128 | 54.7% | **13.9%** |
+| med spa | 174 | 99 | 56.9% | 17 | 17.2% | **9.8%** |
+| practice mgmt SaaS | 149 | 74 | 49.7% | 46 | 62.2% | **30.9%** |
+| vehicle wrap shop | 93 | 34 | 36.6% | 22 | 64.7% | **23.7%** |
+| dental practice | 74 | 44 | 59.5% | 14 | 31.8% | **18.9%** |
+
+**There are two different problems here and they need different work.**
+
+*Naming-limited:* car wrap (25.4%) and vehicle wrap (36.6%) name a quarter to a
+third of businesses and then convert well. *Mailbox-limited:* med spa (56.9%
+named → 17.2% converted) and dental (59.5% → 31.8%) find the person and cannot
+reach them. SaaS is the only niche that is good at both, which is why it is the
+best-yielding one at 30.9%.
+
+This retires "the benchmark niche contaminated three phases" as a live risk by
+naming the mechanism: med spas are not a bad niche for *naming*, they are close
+to worst-case for *mailboxes*, and they were the niche every early inference
+about the pipeline was drawn from.
+
+### 13.2 The dominant remaining loss has one cause
+
+**176 businesses are named and unmailable** — 12.5% of everything processed.
+Their failure mode is nearly uniform: **no `owner_email` was ever constructed
+that verified.** Not "constructed and bounced" — of 209 Tier C rows, 205 have no
+owner mailbox at all, 1 risky, 0 invalid. Only 34 are catch-all domains, and a
+catch-all is not a blocker in itself: `enrich-lead` already promotes a
+catch-all to Tier B when the address follows a known pattern on a domain that
+reads its mail.
+
+So this is not a verification problem and not a gate problem. **The pipeline
+guesses mailboxes from patterns and has no source that simply knows one.**
+
+**v2 has no provider lookup.** v1 had `provider.ts` (Hunter / Apollo);
+`discoverDomainPattern` in v2 uses four free sources — crawl emails, GBP
+emails, `mailto:`, stored contacts — plus one SERP query, then constructs
+candidates from patterns. `PATTERN_LADDER_EXTRAS` was measured as **zero
+recovery for 2.6× the verification spend**, which says the pattern ladder is
+exhausted, not that the mailboxes do not exist.
+
+### 13.3 Projected ceiling per 100 businesses
+
+The only unmeasured input is the provider hit rate on a named person at a known
+domain. **35% is an assumption, not a measurement** — it is the middle of what
+Hunter and Apollo claim for SMB email-finder queries, and small local trades
+will sit below it. Everything else below is measured.
+
+| niche | now | Tier C /100 | + provider @35% | + SERP at speed | **projected ceiling** |
+|---|---|---|---|---|---|
+| practice mgmt SaaS | 30.9 | 16.8 | +5.9 | +3–5 | **~40** |
+| dental practice | 18.9 | 29.7 | +10.4 | — | **~29** |
+| vehicle wrap shop | 23.7 | 5.4 | +1.9 | — | **~26** |
+| med spa | 9.8 | 27.0 | +9.5 | — | **~19** |
+| car wrap | 13.9 | 8.4 | +2.9 | — | **~17** |
+
+Globally: **16.1% → ~20–22%** sendable, on one lever.
+
+At a 50% provider hit rate the global figure is ~22.4%; at 20% it is ~18.6%.
+**The spread between those is worth more than any other open item**, which is
+the argument for buying one month of a provider and measuring it on the 176
+before committing to anything else.
+
+### 13.4 What is left from the brief that moves the number
+
+| item | worth | verdict |
+|---|---|---|
+| **Provider lookup (Hunter/Apollo)** | **+4 to +6 pts globally, +10 in the mailbox-limited niches** | **The only large one left.** Build it |
+| SERP at speed (`SERPER_API_KEY`) | +3–5 pts on SaaS only | Cheap, and the hypothesis is testable — §13.5 |
+| Playwright | ~13% of crawls fetch **zero** pages (180/1145 car wrap, 43/331 med spa). Some are dead sites, some are JS-only | Unmeasured. Worth one measurement, not a build |
+| LinkedIn | +14–18 sendable on SaaS, before the founder phrasing took 18 of the 93 | **No.** §9 |
+| More whole-state registries | 0.3 sendable per name, and **the Socrata route is exhausted** — CO/OR/CT are all that remain and they are small | Marginal |
+| FL county backfill | **Zero.** §5.1a | No |
+| Preflight predictor | Needs 5–10 more campaigns before thresholds mean anything | Blocked on data, not code |
+| gstatic blocking, depth 10→5 | Bytes, not yield | Cost work, not ceiling work |
+| Dead-letter requeue button | Operational | Small |
+
+### 13.5 The SaaS SERP hypothesis, and why it is still open
+
+The founder phrasing scored 16.1% **with Google CSE answering only ~26% of
+results** even at 50-second pacing (584 CSE against 1,678 Bing across the paced
+run). Bing discards `site:` entirely, so roughly three-quarters of that run
+asked the LinkedIn question of an engine that ignored it.
+
+That is not proof that full coverage yields more — the leads CSE did reach may
+have been the easy ones — but it is a specific, cheap test: run the 75 still
+unnamed SaaS businesses through Serper, where every query is a real Google
+query, and compare against the 16.1%.
+
+### 13.6 Is the build phase done?
+
+**Yes, with one exception.**
+
+Everything the brief describes as machinery is built, deployed, measured and
+has survived a restart. The failures found this phase were a latent boot break,
+a query that could not use its index, and a precision guard missing from one of
+two paths — maintenance faults, not missing capability. Nothing in §13.4 except
+provider lookup is a *build*; the rest is a purchase, a measurement, or a button.
+
+The exception is real, though: **the single largest loss in the pipeline — 176
+named businesses nobody can email — is caused by a component v1 had and v2 does
+not.** That is a gap in the build, not a tuning opportunity, and it is the last
+one.
+
+Recommendation: **build provider lookup, measure it on the 176 before scaling,
+and treat the build phase as closed when that number is in.** Buy a Serper month
+in the same window and settle §13.5 with it. Everything else on the list is
+worth less than the measurement error on those two.
+
 ## 12. Commit history (this phase)
 
 | Commit | What |
@@ -625,4 +882,5 @@ any of it.
 | `d5f68f1` | NY whole-state, and the preflight launch test says not yet |
 | `5ffb5c1` | ui: show the census, drop the band it cannot yet support |
 | `71ae092` | docs: rewrite HANDOFF as the current-state document |
-| *(this)* | SERP founder phrasing, FL whole-state, and the boot break a restart found |
+| `9141d9b` | SERP founder phrasing, FL whole-state, and the boot break a restart found |
+| *(this)* | ZIP→county crosswalk, the SERP provider switch, and the ceiling arithmetic |

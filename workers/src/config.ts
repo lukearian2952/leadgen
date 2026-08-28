@@ -57,14 +57,26 @@ const SPECS: VarSpec[] = [
 
   // Services
   { name: 'SEARXNG_URL',              requiredFor: ['serp'] },
+  { name: 'SERPER_API_KEY',           requiredFor: [],
+    degrades: 'SERP runs on self-hosted SearXNG, paced to ~3.6 queries/min — the ' +
+              'rate Google CSE tolerates, and the only upstream honouring site:' },
+  { name: 'SERP_PROVIDER',            requiredFor: [],
+    degrades: 'provider chosen by whether SERPER_API_KEY is set' },
+  { name: 'SEARXNG_MIN_QUERY_INTERVAL_MS', requiredFor: [],
+    degrades: 'SearXNG pacing defaults to 16700ms between queries' },
+  { name: 'SERPER_MAX_QUERIES_PER_CAMPAIGN', requiredFor: [],
+    degrades: 'Serper query cap defaults to 500 per campaign' },
   { name: 'CRAWL4AI_URL',             requiredFor: ['crawl'] },
   { name: 'GOOGLE_MAPS_SCRAPER_URL',  requiredFor: ['maps'] },
   { name: 'GOOGLE_PLACES_API_KEY',    requiredFor: [],
     degrades: 'place_id resolution fallback is unavailable (scraper-only Maps discovery)' },
 
   // Registry
-  { name: 'SOCRATA_APP_TOKEN', requiredFor: [],
-    degrades: 'Socrata requests are throttled harder (shared anonymous pool)' },
+  // Deliberately no `degrades` note. Running Socrata anonymously is an accepted
+  // standing decision, not a degradation to be reported at every boot: the
+  // shared pool completes every ingest we run, NY whole-state included, and a
+  // warning nobody intends to act on trains people to ignore the boot log.
+  { name: 'SOCRATA_APP_TOKEN', requiredFor: [] },
   { name: 'REGISTRY_REVERSE_STATEWIDE', requiredFor: [],
     degrades: 'reverse officer lookup stays county-scoped (no statewide fallback)' },
   { name: 'REGISTRY_MAX_DB_MB', requiredFor: [],
@@ -142,6 +154,13 @@ export interface Config {
     stickyTtlSeconds: number
   }
   searxngUrl: string
+  /** '' = choose by whether serperApiKey is set; 'searxng' | 'serper' forces one. */
+  serpProvider: string
+  serperApiKey: string
+  /** Process-wide spacing between SearXNG queries. See sources/serp-provider.ts. */
+  searxngMinQueryIntervalMs: number
+  /** Hard per-campaign ceiling on paid SERP queries. */
+  serperMaxQueriesPerCampaign: number
   crawl4aiUrl: string
   mapsScraperUrl: string
   googlePlacesApiKey: string
@@ -264,6 +283,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       stickyTtlSeconds: Number(env.DECODO_STICKY_TTL ?? 600),
     },
     searxngUrl:         env.SEARXNG_URL ?? '',
+    serpProvider:       env.SERP_PROVIDER ?? '',
+    serperApiKey:       env.SERPER_API_KEY ?? '',
+    // 16.7s ≈ the nine-queries-per-two-minutes Google CSE actually tolerated.
+    searxngMinQueryIntervalMs:
+      Number(env.SEARXNG_MIN_QUERY_INTERVAL_MS ?? 16_700),
+    serperMaxQueriesPerCampaign:
+      Number(env.SERPER_MAX_QUERIES_PER_CAMPAIGN ?? 500),
     crawl4aiUrl:        env.CRAWL4AI_URL ?? '',
     mapsScraperUrl:     env.GOOGLE_MAPS_SCRAPER_URL ?? '',
     googlePlacesApiKey: env.GOOGLE_PLACES_API_KEY ?? '',

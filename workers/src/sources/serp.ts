@@ -1,53 +1,52 @@
-// SERP via the self-hosted SearXNG, with a 30-day cache.
+// SERP querying: the cache, the query shapes, and the text handed to the model.
 //
-// SearXNG aggregates several upstreams behind one JSON endpoint — a live probe
-// against the running instance returned merged brave / bing / google-cse
-// results for `"Bella Fiore Med Spa" Oceanside owner` — so one request here is
-// several searches, and the cache is what keeps that affordable across re-runs.
-//
-// ── Egress, stated rather than assumed ───────────────────────────────────────
-//
-// `searxng/settings.yml` configures no outbound proxy, so SearXNG's upstream
-// requests leave from the server's own IP, not through Decodo. ARCHITECTURE.md
-// §4E describes it as going via Decodo; it does not. That is left as it is
-// here — it works, the volume is ~2 queries per lead, and rerouting a search
-// aggregator's egress mid-phase is a change with its own failure modes — but
-// it is a real difference between the design and the deployment, and it is the
-// thing to change first if the upstreams start returning captchas.
-//
-// The worker→SearXNG hop itself is container-internal and needs no proxy.
+// The transport lives in `serp-provider.ts` — SearXNG or Serper behind one
+// interface — because the self-hosted instance has a measured throughput
+// ceiling that is worth being able to pay to remove. Read that file's header
+// before changing anything about how often this is called.
 
 import { createHash } from 'node:crypto'
 import type { Pool } from 'pg'
-import { httpFetch } from '../net.js'
 import type { Logger } from '../logger.js'
+import type { SerpProvider, SerpResult } from './serp-provider.js'
 
-export interface SerpResult {
-  title: string
-  url: string
-  content: string
-  engine: string
-}
+export type { SerpResult } from './serp-provider.js'
 
 /** The brief's cache lifetime. */
 export const CACHE_DAYS = 30
+
+export interface SearchOutcome {
+  results: SerpResult[]
+  cached: boolean
+  /** Response bytes for an uncached query; 0 for a cache hit. */
+  bytes: number
+}
 
 export class SerpSource {
   readonly name = 'serp'
 
   constructor(
-    private readonly baseUrl: string,
+    private readonly provider: SerpProvider,
     private readonly db: Pool,
     private readonly logger: Logger,
   ) {}
 
+  /** Which backend answered, for the run's cost detail. */
+  get providerName(): string { return this.provider.name }
+
   /**
    * Run a query, or return the cached results if they are inside the window.
    *
-   * Returns `{ results, cached }` so callers can report cache hit rate — the
-   * number that says whether a re-run cost anything.
+   * Returns `cached` so callers can report hit rate — the number that says
+   * whether a re-run cost anything — and `bytes` so SERP stops being the one
+   * stage whose traffic never reaches `source_costs`.
+   *
+   * The cache is keyed on the query alone, deliberately: swapping provider does
+   * not invalidate it, because the question asked has not changed. A run that
+   * needs fresh answers from a new provider clears the rows first, as the
+   * phrasing experiment did.
    */
-  async search(query: string, maxResults = 10): Promise<{ results: SerpResult[]; cached: boolean }> {
+  async search(query: string, maxResults = 10): Promise<SearchOutcome> {
     const hash = queryHash(query)
 
     const { rows } = await this.db.query<{ results: SerpResult[] }>(
@@ -58,45 +57,20 @@ export class SerpSource {
     if (rows[0]) {
       await this.db.query(
         `update serp_cache set hit_count = hit_count + 1 where query_hash = $1`, [hash])
-      return { results: (rows[0].results ?? []).slice(0, maxResults), cached: true }
+      return { results: (rows[0].results ?? []).slice(0, maxResults), cached: true, bytes: 0 }
     }
 
-    const results = await this.fetch(query, maxResults)
+    const got = await this.provider.search(query, maxResults)
 
     await this.db.query(
       `insert into serp_cache (query_hash, query, engine, results, fetched_at)
-       values ($1,$2,'searxng',$3::jsonb, now())
+       values ($1,$2,$3,$4::jsonb, now())
        on conflict (query_hash) do update
-         set results = excluded.results, fetched_at = now(), hit_count = 0`,
-      [hash, query, JSON.stringify(results)])
+         set results = excluded.results, engine = excluded.engine,
+             fetched_at = now(), hit_count = 0`,
+      [hash, query, this.provider.name, JSON.stringify(got.results)])
 
-    return { results, cached: false }
-  }
-
-  private async fetch(query: string, maxResults: number): Promise<SerpResult[]> {
-    const url = new URL('/search', this.baseUrl)
-    url.searchParams.set('q', query)
-    url.searchParams.set('format', 'json')
-    url.searchParams.set('language', 'en-US')
-    // General category only: image and news verticals add latency and never
-    // carry an owner's name.
-    url.searchParams.set('categories', 'general')
-
-    const res = await httpFetch(url, {
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(45_000),
-    })
-    if (!res.ok) {
-      throw new Error(`searxng HTTP ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`)
-    }
-
-    const body = await res.json() as { results?: Array<Record<string, unknown>> }
-    return (body.results ?? []).slice(0, maxResults).map(r => ({
-      title: String(r.title ?? ''),
-      url: String(r.url ?? ''),
-      content: String(r.content ?? ''),
-      engine: String(r.engine ?? ''),
-    }))
+    return { results: got.results, cached: false, bytes: got.bytes }
   }
 }
 

@@ -26,6 +26,7 @@ import type { Task } from 'graphile-worker'
 import { wrapTask, jobKey } from './wrap.js'
 import type { TaskDeps } from './index.js'
 import { makeSaasDiscovery } from '../sources/saas.js'
+import { makeSerpProvider } from '../sources/serp-provider.js'
 import { normaliseName } from '../lib/normalise.js'
 import { isJunkDomain } from '../lib/identity.js'
 
@@ -61,7 +62,13 @@ export function makeSaasDiscoverTask(deps: TaskDeps): Task {
         'for an online niche — see sources/saas.ts for why the directories are not.')
     }
 
-    const discovery = makeSaasDiscovery(config.searxngUrl, db, ctx.logger)
+    const provider = makeSerpProvider(config, ctx.logger)
+    if (!provider) {
+      ctx.logger.warn('no SERP provider configured — saas:discover cannot run')
+      ctx.cost.detail = { skipped: 'no_serp_provider' }
+      return
+    }
+    const discovery = makeSaasDiscovery(provider, db, ctx.logger)
     const { candidates, queries, cachedQueries } =
       await discovery.discover(niche, location)
 

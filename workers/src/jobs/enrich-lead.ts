@@ -23,6 +23,7 @@ import {
   discoverPattern, domainHasPublishedMailbox, addressQuery, addressesFromText,
   type DiscoveryResult, type PatternSource,
 } from '../lib/pattern-discovery.js'
+import { makeSerpProvider } from '../sources/serp-provider.js'
 import { SerpSource } from '../sources/serp.js'
 import type { NameCandidate } from '../lib/name-decision.js'
 import {
@@ -514,10 +515,12 @@ async function discoverDomainPattern(
 
   // One SERP query, only when the free sources came up empty and there is
   // someone to attribute an address to.
-  if (!result.discovered && people.length && config.searxngUrl) {
+  const addressProvider =
+    !result.discovered && people.length ? makeSerpProvider(config, ctx.logger) : null
+  if (addressProvider) {
     try {
-      const serp = new SerpSource(config.searxngUrl, db, ctx.logger)
-      const { results, cached } = await serp.search(addressQuery(domain), 8)
+      const serp = new SerpSource(addressProvider, db, ctx.logger)
+      const { results, cached, bytes } = await serp.search(addressQuery(domain), 8)
       const found = new Set<string>()
       for (const r of results) {
         for (const e of addressesFromText(`${r.title} ${r.content} ${r.url}`, domain)) found.add(e)
@@ -526,7 +529,17 @@ async function discoverDomainPattern(
         for (const email of found) addresses.push({ email, source: 'serp' })
         result = discoverPattern({ domain, addresses, people })
       }
-      ctx.cost.detail = { ...ctx.cost.detail, address_serp_cached: cached, address_serp_found: found.size }
+      // This stage's one SERP query is metered like serp:owner's, so the
+      // campaign's query count is the real total rather than serp:owner's share.
+      if (!cached) {
+        await db.query(`select add_source_cost($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [campaignId, 'serp_queries', `serp:${addressProvider.name}`, 1, bytes, 0, 0,
+           addressProvider.centsPerQuery])
+      }
+      ctx.cost.detail = {
+        ...ctx.cost.detail, address_serp_cached: cached,
+        address_serp_found: found.size, address_serp_bytes: bytes,
+      }
     } catch (err) {
       // A SERP outage must not fail the lead — it just means no extra address.
       ctx.logger.warn('address discovery serp failed', { domain, err: (err as Error).message })

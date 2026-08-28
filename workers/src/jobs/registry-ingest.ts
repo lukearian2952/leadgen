@@ -60,9 +60,6 @@ const BATCH = 500
 /** Batches between database-size checks. `pg_database_size` is not free. */
 const SIZE_CHECK_EVERY = 20
 
-/** States whose adapter goes through Socrata and so shares its throttle pool. */
-const SOCRATA_STATES = new Set(['NY', 'CO', 'OR', 'CT'])
-
 /**
  * Thrown when the ingest stops because the database is full rather than
  * because the slice ended. Distinguished from a crash so the caller can tell
@@ -95,11 +92,12 @@ export function makeRegistryIngestTask(deps: TaskDeps): Task {
     const adapter = adapterFor(state, config, ctx.logger)
     if (!adapter) throw new Error(`no registry adapter for state "${payload.state}"`)
 
-    if (!config.socrataAppToken && SOCRATA_STATES.has(state)) {
-      ctx.logger.warn(
-        'SOCRATA_APP_TOKEN is not set — requests share the anonymous throttle pool. ' +
-        'Free from evergreen.data.socrata.com/signup; ingest will be slower and may 429.')
-    }
+    // No SOCRATA_APP_TOKEN warning. Accepted as permanently empty: the shared
+    // anonymous pool has completed every ingest attempted on it, NY whole-state
+    // (31 minutes, 4.27M rows) included. It is slower and it can 429 into the
+    // adapter's retry backoff, which is a throughput fact rather than a fault,
+    // and repeating it on every ingest only devalues the warnings that mean
+    // something.
 
     const wholeState = payload.wholeState === true
     if (wholeState && (payload.nameContains ?? []).length) {

@@ -27,6 +27,7 @@ import type { Task } from 'graphile-worker'
 import { wrapTask, jobKey, type JobContext } from './wrap.js'
 import type { TaskDeps } from './index.js'
 import { SerpSource, ownerQueries, founderQueries, websiteDomain, resultsToText, type SerpResult } from '../sources/serp.js'
+import { makeSerpProvider } from '../sources/serp-provider.js'
 import { askJson, serpOwnerPrompt, serpFounderPrompt, SERP_PEOPLE_SCHEMA, usageCostCents, zeroUsage, addUsage } from '../lib/llm.js'
 import { resolveNicheFilter } from '../lib/niche-types.js'
 import { parseName } from '../lib/identity.js'
@@ -66,23 +67,49 @@ export function makeSerpOwnerTask(deps: TaskDeps): Task {
     const online = resolveNicheFilter(cRows[0]?.niche ?? '').serp
     const domain = websiteDomain(lead.website)
 
-    if (!config.searxngUrl) {
-      ctx.logger.warn('SEARXNG_URL is not set — serp:owner cannot run')
-      ctx.cost.detail = { skipped: 'no_searxng_url' }
+    const provider = makeSerpProvider(config, ctx.logger)
+    if (!provider) {
+      ctx.logger.warn('no SERP provider configured — serp:owner cannot run')
+      ctx.cost.detail = { skipped: 'no_serp_provider' }
       return chain(ctx, db, campaignId, leadId)
     }
 
-    const serp = new SerpSource(config.searxngUrl, db, ctx.logger)
+    // ── the paid-provider cap ────────────────────────────────────────────────
+    //
+    // Serper has no rate ceiling of its own, which is the point of paying for
+    // it and also the risk: a 1,000-lead campaign at three queries each is
+    // 3,000 queries nobody approved. `source_costs` already accumulates units
+    // per campaign atomically, so the spend counter and the cap read the same
+    // row. SearXNG is uncapped because it is free and paced instead.
+    if (provider.centsPerQuery > 0) {
+      const { rows: [spent] } = await db.query<{ units: number }>(
+        `select coalesce(sum(units),0)::int units from source_costs
+          where campaign_id = $1 and source = 'serp_queries'`, [campaignId])
+      if ((spent?.units ?? 0) >= config.serperMaxQueriesPerCampaign) {
+        ctx.logger.warn('serp query cap reached for this campaign', {
+          campaignId, cap: config.serperMaxQueriesPerCampaign, spent: spent?.units,
+        })
+        await putCandidates(db, leadId, 'serp', [])
+        ctx.cost.detail = {
+          provider: provider.name, skipped: 'query_cap',
+          cap: config.serperMaxQueriesPerCampaign, spent: spent?.units ?? 0,
+        }
+        return chain(ctx, db, campaignId, leadId)
+      }
+    }
+
+    const serp = new SerpSource(provider, db, ctx.logger)
     const queries = online
       ? founderQueries(lead.business_name, lead.website)
       : ownerQueries(lead.business_name, lead.city)
 
     const results: SerpResult[] = []
-    let cachedQueries = 0
+    let cachedQueries = 0, liveQueries = 0, serpBytes = 0
     for (const query of queries) {
       try {
         const got = await serp.search(query, 8)
-        if (got.cached) cachedQueries++
+        if (got.cached) cachedQueries++; else liveQueries++
+        serpBytes += got.bytes
         results.push(...got.results)
       } catch (err) {
         // One failing query must not lose the other's results, and a SERP
@@ -96,8 +123,15 @@ export function makeSerpOwnerTask(deps: TaskDeps): Task {
 
     if (!unique.length || !config.anthropicApiKey) {
       await putCandidates(db, leadId, 'serp', [])
+      // Metered even when nothing came back: queries that returned nothing are
+      // exactly the ones a cap and a byte budget need to know about.
+      await meterSerp(db, campaignId, provider.name, liveQueries, serpBytes,
+        liveQueries * provider.centsPerQuery)
+      ctx.cost.cents = liveQueries * provider.centsPerQuery
       ctx.cost.detail = {
-        queries: queries.length, cached_queries: cachedQueries,
+        provider: provider.name,
+        queries: queries.length, live_queries: liveQueries,
+        cached_queries: cachedQueries, serp_bytes: serpBytes,
         results: unique.length, candidates: 0,
         skipped: config.anthropicApiKey ? undefined : 'no_anthropic_key',
       }
@@ -151,10 +185,14 @@ export function makeSerpOwnerTask(deps: TaskDeps): Task {
 
     await putCandidates(db, leadId, 'serp', candidates)
 
-    ctx.cost.cents = usageCostCents(usage)
+    const queryCents = liveQueries * provider.centsPerQuery
+    ctx.cost.cents = usageCostCents(usage) + queryCents
     ctx.cost.detail = {
+      provider: provider.name,
       phrasing: online ? 'founder' : 'owner',
       queries: queries.length,
+      live_queries: liveQueries,
+      serp_bytes: serpBytes,
       cached_queries: cachedQueries,
       results: unique.length,
       candidates: candidates.length,
@@ -164,11 +202,37 @@ export function makeSerpOwnerTask(deps: TaskDeps): Task {
       haiku_calls: usage.calls,
     }
 
+    await meterSerp(db, campaignId, provider.name, liveQueries, serpBytes, queryCents)
+    // The per-lead row stays as it was, minus the query cost now booked above,
+    // so `serp` remains "what naming this lead cost in model tokens".
     await recordSourceCost(db, campaignId, 'serp', 'serp', 1, {},
-      usage.inputTokens, usage.outputTokens, ctx.cost.cents)
+      usage.inputTokens, usage.outputTokens, usageCostCents(usage))
 
     await chain(ctx, db, campaignId, leadId)
   })
+}
+
+/**
+ * Book SERP traffic against the campaign.
+ *
+ * Two rows, deliberately. `serp` counts *leads* and carries the model cost;
+ * `serp_queries` counts *queries* and carries the transport cost and bytes,
+ * because the paid-provider cap is a query budget and one lead is three
+ * queries. Reading a query count off a per-lead row was how SERP stayed
+ * unmetered — HANDOFF §7.3.
+ *
+ * The bytes are what the worker received, not SearXNG's own upstream
+ * residential usage, which leaves the box without passing through ProxyPool and
+ * still is not visible from here.
+ */
+async function meterSerp(
+  db: TaskDeps['db'], campaignId: string, provider: string,
+  liveQueries: number, bytes: number, cents: number,
+): Promise<void> {
+  if (!liveQueries && !bytes) return
+  await db.query(
+    `select add_source_cost($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [campaignId, 'serp_queries', `serp:${provider}`, liveQueries, bytes, 0, 0, cents])
 }
 
 async function chain(
