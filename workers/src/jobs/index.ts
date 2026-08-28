@@ -7,7 +7,7 @@
 // Which tasks a container registers depends on WORKER_ROLE, so `docker compose
 // up --scale crawl-worker=4` scales only the crawl stage.
 
-import type { TaskList } from 'graphile-worker'
+import type { Task, TaskList } from 'graphile-worker'
 import type { Pool } from 'pg'
 import type { Config, WorkerRole } from '../config.js'
 import type { Logger } from '../logger.js'
@@ -70,38 +70,50 @@ export function buildTaskList(deps: TaskDeps): TaskList {
   const { config, db } = deps
   const wanted = new Set(stagesForRole(config.role))
 
-  const all: TaskList = {
-    // Liveness probe for the queue itself. The Phase 1 smoke test enqueues one
-    // of these and asserts it is picked up — which proves DATABASE_URL_DIRECT
-    // really is a session-mode connection and LISTEN/NOTIFY works.
-    'ping': wrapTask({ stage: 'ping', db }, async (payload, ctx) => {
-      ctx.cost.detail = { echo: payload.echo ?? null }
-      ctx.logger.info('ping', { echo: payload.echo ?? null })
-    }),
-
-    'verify:batch':       makeVerifyBatchTask(deps),
-    'maps:discover':      makeMapsDiscoverTask(deps),
+  // Factories, not tasks. Several `make*` functions resolve their dependencies
+  // when they are *called* — `makeRegistryIngestTask` calls `requireRegistryDb`
+  // at construction — so building the whole map and filtering afterwards made
+  // every worker demand every stage's dependencies. A crawl-worker, which has
+  // no registry pool and no reason to want one, crash-looped on
+  // `REGISTRY_DATABASE_URL is not configured` before it registered a single
+  // task. Constructing only what the role runs is what keeps `requireRegistryDb`
+  // an honest error for the registry role instead of a boot failure for
+  // everyone else.
+  const factories: Record<string, () => Task> = {
+    'verify:batch':       () => makeVerifyBatchTask(deps),
+    'maps:discover':      () => makeMapsDiscoverTask(deps),
     // Discovery for niches with no storefront. Search-based; see
     // sources/saas.ts for why the SaaS directories are not crawled.
-    'saas:discover':      makeSaasDiscoverTask(deps),
-    'crawl:site':         makeCrawlSiteTask(deps),
+    'saas:discover':      () => makeSaasDiscoverTask(deps),
+    'crawl:site':         () => makeCrawlSiteTask(deps),
     // Phase 3 naming stages. The chain is
     //   crawl:site → registry:match → [serp:owner] → enrich:lead
     // with registry:match deciding whether SERP is worth buying for a lead.
-    'registry:ingest':    makeRegistryIngestTask(deps),
-    'registry:match':     makeRegistryMatchTask(deps),
+    'registry:ingest':    () => makeRegistryIngestTask(deps),
+    'registry:match':     () => makeRegistryMatchTask(deps),
     // Weekly, from the crontab. Re-runs whatever slice is already loaded.
-    'registry:refresh':   makeRegistryRefreshTask(deps),
-    'serp:owner':         makeSerpOwnerTask(deps),
-    'enrich:lead':        makeEnrichLeadTask(deps),
-    'campaign:reconcile': makeReconcileTask(deps),
+    'registry:refresh':   () => makeRegistryRefreshTask(deps),
+    'serp:owner':         () => makeSerpOwnerTask(deps),
+    'enrich:lead':        () => makeEnrichLeadTask(deps),
+    'campaign:reconcile': () => makeReconcileTask(deps),
   }
 
   // `ping` is always registered — it is how health checks and the smoke test
   // confirm a worker is consuming, regardless of role.
-  const selected: TaskList = { ping: all.ping }
-  for (const [name, task] of Object.entries(all)) {
-    if (wanted.has(name)) selected[name] = task
+  //
+  // Liveness probe for the queue itself. The Phase 1 smoke test enqueues one
+  // of these and asserts it is picked up — which proves DATABASE_URL_DIRECT
+  // really is a session-mode connection and LISTEN/NOTIFY works.
+  const selected: TaskList = {
+    'ping': wrapTask({ stage: 'ping', db }, async (payload, ctx) => {
+      ctx.cost.detail = { echo: payload.echo ?? null }
+      ctx.logger.info('ping', { echo: payload.echo ?? null })
+    }),
+  }
+
+  for (const stage of wanted) {
+    const make = factories[stage]
+    if (make) selected[stage] = make()
   }
   return selected
 }

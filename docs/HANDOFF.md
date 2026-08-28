@@ -7,14 +7,19 @@ they are, `docs/REPORTS/` holds the measurements. **This file is what is
 actually true right now.**
 
 **One-line status:** the pipeline is built, measured, and proven at scale on two
-niches. Registry coverage is five states with NY loaded whole. Verification is
-unblocked. The engineering is not the constraint and has not been for some time
-— **coverage of the naming sources is**, and §5 says exactly where the next
-percentage point is.
+niches. Registry coverage is five states with **NY and FL loaded whole**.
+Verification is unblocked. The engineering is not the constraint and has not
+been for some time — **coverage of the naming sources is**, and §5 says exactly
+where the next percentage point is.
 
-**Next action, already designed and not yet run:** the SERP query experiment in
-§9. It is the cheapest remaining lever on SaaS yield and it gates the decision
-on whether to build LinkedIn at all.
+**The SERP experiment has run (§9). LinkedIn should not be built.** Founder
+phrasing took the SaaS cohort from 0 candidates in 93 to 15, inside the 15–20%
+band §9 set as the do-not-build threshold. The remaining SERP ceiling is
+infrastructural rather than linguistic — see §9.
+
+**Next action:** a FL ZIP→county table and a `registry_entities.county` backfill
+for Florida. FL whole-state delivered its forward matches and **none** of the
+reverse direction, which was 28% of NY's — §5.1.
 
 ---
 
@@ -86,8 +91,8 @@ contacts, the graphile queue, `job_runs`, alerts, `preflight_runs`.
 
 **registry-db** — local Postgres container holding `registry_entities`,
 `zip_county`, `county_for_zip` and `registry_ingest_runs`.
-**1,176 MB · 1,741,635 entities.** Bounded by `REGISTRY_MAX_DB_MB` (20 GB)
-rather than by a plan.
+**9,930 MB · 12,606,482 entities** after Florida was loaded whole. Bounded by
+`REGISTRY_MAX_DB_MB` (20 GB) rather than by a plan.
 
 The registry moved out on 2026-08-27 because it was 239 MB of a 276 MB Supabase
 database and is the only table that grows without bound, while being entirely
@@ -197,12 +202,12 @@ rotated**. v1 keys in a pre-`git init` `.env`: `APIFY_API_KEY` should be revoked
 
 ## 5. Registry coverage — where the yield is
 
-Five states. **NY is loaded whole; the other four are niche-scoped.**
+Five states. **NY and FL are loaded whole; the other three are niche-scoped.**
 
 | State | Rows | Scope | Source |
 |---|---|---|---|
+| **FL** | 11,031,417 | **whole state** | Sunbiz SFTP, 1.8 GB quarterly archive |
 | **NY** | 1,532,811 | **whole state** | `data.ny.gov` Socrata |
-| FL | 166,570 | car-wrap tokens | Sunbiz SFTP, 1.8 GB quarterly archive |
 | CO | 30,259 | car-wrap tokens | `data.colorado.gov` Socrata |
 | OR | 7,045 | car-wrap tokens | `data.oregon.gov` Socrata |
 | CT | 4,950 | car-wrap tokens | `data.ct.gov` ×3, joined |
@@ -228,15 +233,28 @@ a property of the reverse direction. Reverse lookup asks whether a person found
 on a website is an officer of *any* nearby entity; a slice holding only
 wrap-named companies cannot answer it.
 
-| | niche-scoped, 5 states, 1,042 leads | NY whole-state, 586 leads |
-|---|---|---|
-| forward | 69 | 128 |
-| **reverse (county)** | **1** | **42** |
-| **reverse (statewide)** | **0** | **8** |
+| | niche-scoped, 5 states, 1,042 leads | NY whole-state, 586 leads | FL whole-state, 71 leads |
+|---|---|---|---|
+| forward | 69 | 128 | 45 |
+| **reverse (county)** | **1** | **42** | **0** |
+| **reverse (statewide)** | **0** | **8** | **0** |
 
 The reverse direction is **28% of all matches** once a state is loaded whole.
 Whole-state coverage changes *what the pipeline can do*, not just how much it
 finds.
+
+### 5.1a Florida gets the forward half only — and this is the top follow-up
+
+FL whole-state contributed **0 reverse matches, and structurally could not**.
+`zip_county` holds only **NY and OR**, and all 11,031,417 Florida entities have
+`county = ''` — Sunbiz carries city and ZIP, not county, and nothing backfills
+it. The reverse direction keys on county, so it has no input.
+
+Florida therefore bought the forward 72% of what NY's whole-state load bought,
+and none of the remaining 28%. **A FL ZIP→county table plus a backfill of
+`registry_entities.county` is the highest-value registry work available**: the
+11M rows are already loaded and 99.8% of them carry a ZIP, so it is a join, not
+another ingest.
 
 ### 5.2 Multipliers, for estimating what another state is worth
 
@@ -251,16 +269,24 @@ came from niche-scoped slices. A whole-state slice finds the marginal matches
 and those convert worse — they sit on businesses whose domains are more often
 catch-all or absent.
 
-**`registry-coverage-delta.ts` over-predicts naming by ~18%.** It asks whether a
+**Confirmed on Florida.** 71 FL leads, 14 forecast names, 14 materialised, 4
+converted — **0.29 per name, against the 0.3 whole-state multiplier.**
+
+**`registry-coverage-delta.ts` over-predicts naming by ~18% — on NY.** It asks whether a
 registry officer would be *found*; the real stage then applies
 `applyNameDecision`'s name-class and corroboration rules, which reject some. It
 is an upper bound, not a forecast. Say so wherever its output is quoted.
 
 ### 5.3 The cheapest large improvement available
 
-**Load the other four states whole.** NY took 31 minutes and 930 MB against a
-20 GB ceiling; FL, CO, OR and CT are all smaller than NY. Before the registry
-moved out of Supabase this was impossible; it is now routine.
+**Load the remaining three states whole.** NY took 31 minutes and 930 MB;
+**FL took 125 minutes and 8.8 GB** and is by far the largest — CO, OR and CT are
+all far smaller than either. `registry-enqueue.ts <STATE> --whole [mode]` is now
+the supported path; NY and FL were the last two done by hand.
+
+Note the ceiling is closer than it was: registry-db is at **9,930 MB of 20,000**
+after Florida. The three remaining states are small, but a third whole-state
+load the size of FL would not fit.
 
 ---
 
@@ -292,7 +318,11 @@ Campaign `0880d44f-400c-4132-91ac-9c142a448390`.
 | **sendable** | **35** | **23.5%** |
 
 **0.69¢ per business, 0.05 MB residential each — ~30× cheaper than a Maps
-campaign**, and the higher-yielding niche end to end (23.5% vs 13.8%).
+campaign**, and the higher-yielding niche end to end.
+
+**After the SERP experiment (§9): 74 named, 23 Tier A, 23 Tier B, 46 sendable —
+30.9%.** The 93 leads that finished unnamed were replayed as campaign
+`1d8b278e` and contributed 18 names and 11 sendable.
 
 Named by source: `site_crawl` 50, `serp` 6, **`registry` 0** — a SaaS company
 found by search has no postal address, so `registry:match` has no input. The
@@ -411,76 +441,82 @@ before every run.
 
 ---
 
-## 9. Next step: the SERP query experiment
+## 9. The SERP query experiment — run, and the LinkedIn decision
 
-**Designed, not run.** This is the immediate next action and it gates the
-LinkedIn decision.
+**Run 2026-08-27. Verdict: do not build LinkedIn.** Full write-up in
+`docs/REPORTS/2026-08-27-serp-phrasing-and-florida.md`.
 
-### The question
-SaaS naming leaves 93 of 149 leads unnamed, all of them with a website.
-`registry:match` cannot help (§6 — no postal address). So the gap is
-crawl + SERP, and SERP is the half that can be improved without new
-infrastructure.
+### The baseline was misquoted, and the correction matters
 
-### What SERP currently does
-`serp:owner` ran on 100 SaaS leads:
+This section used to give the baseline as **6 candidates per 100 runs**. That is
+right for the stage and wrong for the cohort: `serp:owner` ran on 100 leads,
+which were exactly the 93 that finished unnamed plus 7 that other sources had
+already named — and **all 6 candidates came from those 7**. Over the 93 the old
+phrasing scored **0**.
 
-```
-runs                  100
-runs with a candidate    6      all owner_grade
-haiku calls             92
-```
+### Three causes, where the design assumed one
 
-`ownerQueries` in `src/sources/serp.ts` issues two queries:
+| | what was assumed | what was measured |
+|---|---|---|
+| queries | brick-and-mortar phrasing | true |
+| prompt | not considered | **the dominant cause** — `serpOwnerPrompt` requires a result to be "about this exact business at this location", and a SaaS vendor has no location. 85 model calls returned **4 people in total** |
+| crawl | "only fetches 3 pages; `/about` and `/team` are the fix" | **describes v1.** Both paths were already in `FALLBACK_PATHS`, `PAGE_CAP` is 6, and the 93 averaged 3.44 pages. The real gap was `/company` and `/leadership` |
 
-```
-"<business>" <town> owner OR founder
-site:linkedin.com/in "<business>"
-```
+### The result
 
-Both are **brick-and-mortar phrasings**. "owner" is not the word a SaaS company
-uses, and a bare company name against `linkedin.com/in` matches employees rather
-than founders.
+`founderQueries` + `serpFounderPrompt` for online niches, `/company` and
+`/leadership` added to the crawl. Replayed into campaign `1d8b278e` — a fresh
+campaign, because `PgBudgetLedger` is per campaign and the baseline had to
+survive.
 
-### The change to test
-For niches where `resolveNicheFilter(...).serp` is true (i.e. online/SaaS),
-use founder-shaped queries instead:
+| | old phrasing | founder phrasing |
+|---|---|---|
+| runs | 93 | 93 |
+| avg results per lead | 11.3 | 20.5 |
+| **runs with an owner-grade candidate** | **0** | **15 (16.1%)** |
 
-```
-"<company>" founder OR CEO OR "co-founder" site:linkedin.com/in
-"<company>" "founded by" OR "our story"
-site:<domain> about OR team OR leadership
-```
+Cohort outcome, all net new: **18 named (19.4%), 8 Tier A, 3 Tier B, 11
+sendable.** Practice-management SaaS overall **35 → 46 sendable, 23.5% → 30.9%.**
 
-The third is the important one: a SaaS vendor's `/about` and `/team` pages name
-the founders, and `crawl:site` only fetches three pages, which are usually
-`/`, `/pricing` and whatever it found first.
+128¢ across both runs against a 300¢ cap. **The cap was never the constraint —
+naming is the bottleneck, not verification.**
 
-### How to measure it
-Re-run `serp:owner` over the **same 93 unnamed leads** of campaign
-`0880d44f-400c-4132-91ac-9c142a448390`. The 30-day `serp_cache` means the old
-queries cost nothing to keep for comparison; the new ones are fresh.
+### The first result was a measurement of the infrastructure, not the phrasing
 
-Success is the candidate rate. Current baseline is **6 per 100**.
+The run initially scored 1 in 89, and that number is void. `site:linkedin.com/in`
+is honoured by exactly one upstream:
 
-### The decision it gates
+| engine | results | with a `linkedin.com/in` URL |
+|---|---|---|
+| bing | 2,040 | 3 (0.15%) |
+| google cse | 89 | 17 (19%) |
 
-| Outcome | Then |
-|---|---|
-| SERP reaches **15–20%** | LinkedIn's remaining upside roughly halves. Do not build it |
-| SERP stays near **6%** | LinkedIn is the only remaining lever on SaaS naming |
+**Bing silently discards the `site:` operator** and returns the company's own
+domain. Google CSE answers **~9 queries and is then suspended for ~2 minutes**;
+`serp:owner` fired 267 queries in four minutes, so Bing answered 96% of the run.
+The 16.1% above was measured after re-pacing to one lead every 50 seconds.
 
-**Do not build LinkedIn before this runs.** Its upside — 93 unnamed leads, a
-generous 50% hit rate, converting at 0.3–0.4 — is **+14 to +18 sendable**, taking
-SaaS from 23.5% to ~33–35%. Real, but against it: `LINKEDIN_ACCOUNTS` is empty
-and the accounts are yours to have banned; StaffSpy's last release is 2025-01-06
-and `tomquirk/linkedin-api` is still 404, so vendoring means owning it; and
-starting `linkedin-worker` makes eight workers against a ~15-slot session budget
-(§2), so something must be scaled down first.
+This is the failure mode `searxng/settings.yml` already documents and §11 lists
+as having caused a retraction before: the instance answers `200` with a
+`results` array, just a much worse one. **Any SERP number taken from a burst run
+is suspect — check the engine mix before believing it.**
 
-The SERP experiment costs a query change and one re-run.
+### Why not LinkedIn
 
----
+§9's own table: SERP at 15–20% means do not build it. 16.1% is inside the band.
+Beyond that:
+
+- The 93 leads the upside was sized against are now 75 — 18 are named.
+- Everything already against it holds: `LINKEDIN_ACCOUNTS` empty, StaffSpy
+  unmaintained, `tomquirk/linkedin-api` 404, and an eighth worker does not fit
+  the ~15-slot session budget.
+
+**Do this instead.** The SERP ceiling is now infrastructural, not linguistic:
+one upstream honours `site:` and it sustains ~3.6 queries a minute. A paid
+search API for the LinkedIn query alone — one query per lead — removes the
+pacing constraint and is a config change, not a worker. `SOCRATA_APP_TOKEN` is
+still empty too, and both are the same shape of fix: stop running the pipeline's
+search layer on anonymous shared quota.
 
 ## 10. Operational traps — each of these cost real time
 
@@ -509,6 +545,19 @@ The SERP experiment costs a query change and one re-run.
    that exclusion did not reach the server.
 9. **Scripts run via `run.sh` write as uid 10001.** Output paths must be in a
    world-writable mount or they fail `EACCES` after doing all the work.
+10. **`buildTaskList` must construct only the role's stages.** It used to build
+    every task and filter afterwards, and `makeRegistryIngestTask` resolves the
+    registry pool at construction — so after the registry split, six of seven
+    workers crash-looped on `REGISTRY_DATABASE_URL is not configured` on the
+    first restart, having never registered a task. Only `registry-worker` gets
+    that variable in compose. Fixed 2026-08-27; the shape of the bug is worth
+    remembering, because **nothing had restarted between the split and the fix,
+    so a deployed system sat for a day in a state where any restart took down
+    six of seven workers.**
+11. **A SERP result taken from a burst run is not a measurement.** Google CSE is
+    the only upstream honouring `site:`, and it answers ~9 queries before a ~2
+    minute suspension; Bing answers anyway, discarding the operator. Check the
+    engine mix in `serp_cache` before drawing a conclusion — §9.
 
 ---
 
@@ -525,6 +574,13 @@ nearly-published "Hostinger blocked port 25" resting on a probe that mis-scored
 every attempt; "blocking www.gstatic.com breaks discovery" (quota exhaustion
 wearing a costume); and **"the reverse lookup is not worth expanding"** (§5.1),
 which was niche scoping, not the reverse direction.
+
+**Retracted in this phase:** "the SERP baseline is 6 per 100" (right for the
+stage, zero for the cohort); "`crawl:site` only fetches three pages and needs
+`/about` and `/team`" (that was v1 — both were already there); and the SERP
+experiment's own first result of 1-in-89, which was Google CSE being
+rate-limited rather than the phrasing failing. The last of these is the third
+time a quota exhaustion has worn the costume of a real finding.
 
 **Dissolved on contact with data rather than being fixed:** `decodo-proxy`,
 `gbp_owner` (0/100 person-shaped), the crawl "coverage bug" (the title gate was
@@ -543,10 +599,12 @@ quarterly mode forward. The ingest never wrote the field. Florida would have
 been silently re-ingested as five days of filings instead of the whole state.
 
 **Built, tested, and never executed is its own failure mode, and it has happened
-three times here.** Florida's date format (parsed backwards, test asserted only
-the *shape*), the preflight census (a predictor with no runner), and the
-`status = 'ok'` checks written against a schema that says `complete`. Run the
-thing once against reality before believing any of it.
+four times here.** Florida's date format (parsed backwards, test asserted only
+the *shape*), the preflight census (a predictor with no runner), the
+`status = 'ok'` checks written against a schema that says `complete`, and now
+`buildTaskList` after the registry split — tested, deployed, and broken in a way
+only a restart could reveal. Run the thing once against reality before believing
+any of it.
 
 ---
 
@@ -566,3 +624,5 @@ thing once against reality before believing any of it.
 | `a3b016b` | preflight: give the census a runner, and report what it says |
 | `d5f68f1` | NY whole-state, and the preflight launch test says not yet |
 | `5ffb5c1` | ui: show the census, drop the band it cannot yet support |
+| `71ae092` | docs: rewrite HANDOFF as the current-state document |
+| *(this)* | SERP founder phrasing, FL whole-state, and the boot break a restart found |

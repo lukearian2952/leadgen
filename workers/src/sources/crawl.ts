@@ -20,14 +20,25 @@ const PAGE_CAP = 6
 const MAX_BYTES = 2_000_000
 const MAX_TEXT = 24_000
 
-/** Paths worth trying when the homepage exposes no obvious people link. */
+/**
+ * Paths worth trying when the homepage exposes no obvious people link.
+ *
+ * The second row is the software-vendor vocabulary. `/about` and `/team` were
+ * always here — the claim that this crawler fetches only three fixed pages
+ * described v1, not this code, and the 93 unnamed SaaS leads averaged 3.44
+ * pages with a cap of six. What was actually missing is that a SaaS company
+ * files its people under `/company` or `/leadership` far more often than under
+ * `/staff` or `/providers`, and neither word appeared here or in the link
+ * regex, so both the discovered-link path and the blind path missed them.
+ */
 const FALLBACK_PATHS = [
   '/about', '/about-us', '/team', '/our-team', '/meet-the-team',
   '/staff', '/our-story', '/founder', '/providers', '/doctors', '/contact',
+  '/company', '/leadership', '/about/team', '/who-we-are', '/our-founders',
 ]
 
 const PEOPLE_LINK_RE =
-  /about|team|staff|founder|our[-_ ]?story|provider|doctor|practitioner|meet[-_ ]|contact/i
+  /about|team|staff|founder|our[-_ ]?story|provider|doctor|practitioner|meet[-_ ]|contact|leadership|company|who[-_ ]we[-_ ]are|executive/i
 
 /** Responses that mean "come back as a residential user". */
 const BLOCKED_STATUSES = new Set([401, 403, 406, 409, 429, 503])

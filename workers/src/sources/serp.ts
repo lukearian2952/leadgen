@@ -105,7 +105,7 @@ export function queryHash(query: string): string {
 }
 
 /**
- * The two queries from the brief.
+ * The two queries from the brief — the brick-and-mortar phrasing.
  *
  * The first asks the open web who runs the business. The second is aimed at
  * LinkedIn, which is where titled owners actually are, without touching
@@ -120,6 +120,54 @@ export function ownerQueries(businessName: string, town: string): string[] {
     `"${name}"${where ? ` ${where}` : ''} owner OR founder`,
     `site:linkedin.com/in "${name}"`,
   ]
+}
+
+/**
+ * The online/SaaS phrasing.
+ *
+ * Measured cause, not a guess: over the 93 unnamed SaaS leads of campaign
+ * 0880d44f the brick-and-mortar queries produced **zero** accepted candidates
+ * — 85 model calls, 4 people returned in total. Three things are wrong with
+ * them for a company with no storefront:
+ *
+ *   - "owner" is not the word a software company uses about itself. Its people
+ *     are founders, co-founders and CEOs, and the pages that say so are press
+ *     releases and funding announcements.
+ *   - A bare company name against `linkedin.com/in` ranks *employees*, who are
+ *     numerous, above the two founders, who are not. Naming the title in the
+ *     query is what moves the founder to the top of the index.
+ *   - Neither query asks the vendor's own site who founded it, and an "our
+ *     story" page states it in prose that the crawl's people-extraction, which
+ *     is looking for name/title pairs in a team grid, reads straight past.
+ *
+ * The `site:` query is scoped to the vendor's own domain when we know it —
+ * unscoped it competes with the whole web for a generic word like "about".
+ */
+export function founderQueries(
+  businessName: string, website?: string | null,
+): string[] {
+  const name = businessName.replace(/"/g, '').trim()
+  const queries = [
+    `"${name}" founder OR CEO OR "co-founder" site:linkedin.com/in`,
+    `"${name}" "founded by" OR "our story"`,
+  ]
+
+  const domain = websiteDomain(website)
+  if (domain) queries.push(`site:${domain} about OR team OR leadership`)
+
+  return queries
+}
+
+/** Bare hostname for a `site:` query, or null when there is nothing usable. */
+export function websiteDomain(website?: string | null): string | null {
+  const raw = (website ?? '').trim()
+  if (!raw) return null
+  try {
+    return new URL(raw.startsWith('http') ? raw : `https://${raw}`)
+      .hostname.replace(/^www\./, '') || null
+  } catch {
+    return null
+  }
 }
 
 /** Compact the results into the block handed to the model. */

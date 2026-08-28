@@ -26,8 +26,9 @@
 import type { Task } from 'graphile-worker'
 import { wrapTask, jobKey, type JobContext } from './wrap.js'
 import type { TaskDeps } from './index.js'
-import { SerpSource, ownerQueries, resultsToText, type SerpResult } from '../sources/serp.js'
-import { askJson, serpOwnerPrompt, SERP_PEOPLE_SCHEMA, usageCostCents, zeroUsage, addUsage } from '../lib/llm.js'
+import { SerpSource, ownerQueries, founderQueries, websiteDomain, resultsToText, type SerpResult } from '../sources/serp.js'
+import { askJson, serpOwnerPrompt, serpFounderPrompt, SERP_PEOPLE_SCHEMA, usageCostCents, zeroUsage, addUsage } from '../lib/llm.js'
+import { resolveNicheFilter } from '../lib/niche-types.js'
 import { parseName } from '../lib/identity.js'
 import { classifyPerson } from '../lib/name-class.js'
 import { putCandidates, applyNameDecision } from './name-store.js'
@@ -51,10 +52,19 @@ export function makeSerpOwnerTask(deps: TaskDeps): Task {
   return wrapTask<Payload>({ stage: 'serp:owner', db }, async (payload, ctx) => {
     const { campaignId, leadId } = payload
 
-    const { rows } = await db.query<{ business_name: string; city: string }>(
-      `select business_name, city from leads where id = $1`, [leadId])
+    const { rows } = await db.query<{ business_name: string; city: string; website: string | null }>(
+      `select business_name, city, website from leads where id = $1`, [leadId])
     const lead = rows[0]
     if (!lead) { ctx.logger.warn('lead vanished'); return }
+
+    // Which phrasing? `resolveNicheFilter` sets `serp` only in its no-rule
+    // fallback, and every rule in niche-types is a brick-and-mortar trade — so
+    // `serp === true` is exactly the online/SaaS case. The same discriminator
+    // registry:match already uses to decide whether to run this stage at all.
+    const { rows: cRows } = await db.query<{ niche: string }>(
+      `select niche from campaigns where id = $1`, [campaignId])
+    const online = resolveNicheFilter(cRows[0]?.niche ?? '').serp
+    const domain = websiteDomain(lead.website)
 
     if (!config.searxngUrl) {
       ctx.logger.warn('SEARXNG_URL is not set — serp:owner cannot run')
@@ -63,7 +73,9 @@ export function makeSerpOwnerTask(deps: TaskDeps): Task {
     }
 
     const serp = new SerpSource(config.searxngUrl, db, ctx.logger)
-    const queries = ownerQueries(lead.business_name, lead.city)
+    const queries = online
+      ? founderQueries(lead.business_name, lead.website)
+      : ownerQueries(lead.business_name, lead.city)
 
     const results: SerpResult[] = []
     let cachedQueries = 0
@@ -95,7 +107,9 @@ export function makeSerpOwnerTask(deps: TaskDeps): Task {
     // ── extraction ────────────────────────────────────────────────────────────
     const llm = await askJson<{ people?: SerpPerson[] }>(
       config.anthropicApiKey,
-      serpOwnerPrompt(lead.business_name, lead.city, resultsToText(unique)),
+      online
+        ? serpFounderPrompt(lead.business_name, domain ?? '', resultsToText(unique))
+        : serpOwnerPrompt(lead.business_name, lead.city, resultsToText(unique)),
       SERP_PEOPLE_SCHEMA, 1200,
     )
     const usage = addUsage(zeroUsage(), llm.usage)
@@ -139,6 +153,7 @@ export function makeSerpOwnerTask(deps: TaskDeps): Task {
 
     ctx.cost.cents = usageCostCents(usage)
     ctx.cost.detail = {
+      phrasing: online ? 'founder' : 'owner',
       queries: queries.length,
       cached_queries: cachedQueries,
       results: unique.length,

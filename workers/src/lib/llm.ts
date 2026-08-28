@@ -204,6 +204,47 @@ Rules:
 - Return an empty array if no individual is identified.`
 }
 
+/**
+ * The founder-shaped variant, for niches with no storefront.
+ *
+ * `serpOwnerPrompt` is not merely worded for local businesses — its locality
+ * rule actively suppresses the answer here. It says the result "must be about
+ * this exact business at this location", and a SaaS vendor has no location, so
+ * `Location: unknown` turns that guard into a near-blanket instruction to
+ * return nothing. That is the measured behaviour: across the 93 unnamed SaaS
+ * leads it made 85 model calls and returned 4 people in total.
+ *
+ * The disambiguation problem is real and does not go away — two companies
+ * genuinely share a name. What changes is the evidence that settles it: for a
+ * vendor it is the domain, not the town, so that is what this asks the model
+ * to match on.
+ */
+export function serpFounderPrompt(
+  companyName: string, domain: string, resultsText: string,
+): string {
+  return `You are identifying the founder, co-founder or CEO of a software company from web search results.
+
+Company: ${companyName}
+Company website: ${domain || 'unknown'}
+
+Search results follow between the markers. Each is numbered, with its title, URL and snippet.
+
+---BEGIN RESULTS---
+${resultsText}
+---END RESULTS---
+
+Return every individual the results identify as a founder, co-founder, CEO, president or owner of THIS company, with their stated role.
+
+Rules:
+- The result must be about this exact company. Company names are frequently shared; use the website domain above as the deciding evidence, and treat a LinkedIn profile or article that names this company as being about it. If you cannot tell which company a result describes, do not return anything from it.
+- This company has no single physical location. Do not reject a result for failing to state a town, a city or an address.
+- Only real people. Never return the company name, a department, an investor firm, or a title with no person attached.
+- Copy names, titles and URLs verbatim. Do not infer, complete, or reformat a name.
+- Prefer founders and chief executives. Return engineers, sales staff and other employees only when the result explicitly gives them one of those roles.
+- Use confidence "high" only when a single result states both the person's name and their role at this company.
+- Return an empty array if no individual is identified.`
+}
+
 export function peoplePrompt(businessName: string, pageText: string): string {
   return `You are extracting the owner or principal decision-maker of a small local business from its own website.
 
