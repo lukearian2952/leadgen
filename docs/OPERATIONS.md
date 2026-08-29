@@ -119,6 +119,10 @@ a named owner on a catch-all domain, or an owner-named freemail address. There
 is no proof that specific mailbox exists. Segment it away from Tier A in any
 send; merging them is how you get a bounce rate.
 
+The CSV does **not** segment them. **Send to MailForge** (§2.2b) does, and puts
+catch-all rows in their own list automatically — prefer it over exporting and
+splitting by hand.
+
 `exports/` is gitignored, holds customer records, and **is backed up nowhere**.
 Treat a CSV there as the only copy.
 
@@ -126,16 +130,60 @@ Treat a CSV there as the only copy.
 
 ## 2. The dashboards
 
-### 2.1 Campaign list — `/`
-Every campaign, status, and yield. The **preflight census** number shows here:
-what share of businesses in a niche publish a personal address on their own
-site. It is a comparison *between niches*, not a prediction — the predictive
-band was dropped because it returned the same answer for all five niches
-measured. Treat a high census as "worth trying before the others", nothing more.
+**The UI now lives in MailForge.** As of 2026-08-29 the React app in this repo's
+`src/` is deprecated and is not deployed — see `src/README.md`. Open MailForge
+and click **Lead Gen** in the sidebar. Everything below is that tab.
 
-### 2.2 Campaign detail — `/campaign/:id`
-The funnel, per-tier counts, the live log, and **the alert banner** (§6). Leads
+MailForge talks to this Supabase project through a second Supabase client with
+its own anon key. Two projects means two auth realms, so the Lead Gen tab asks
+for a Lead Gen sign-in the first time it is opened, and keeps that session
+separately from MailForge's. Signing out of one does not sign you out of the
+other.
+
+**Nothing about the backend changed.** The worker fleet, this Supabase project,
+registry-db and the crons are untouched. The rest of this document, `RUNBOOK.md`
+and `HANDOFF.md` are unaffected.
+
+### 2.1 Campaign list — MailForge `/leadgen`
+Every campaign, status, and yield. The **preflight census** number shows on the
+campaign builder: what share of businesses in a niche publish a personal address
+on their own site. It is a comparison *between niches*, not a prediction — the
+predictive band was dropped because it returned the same answer for all five
+niches measured. Treat a high census as "worth trying before the others",
+nothing more.
+
+### 2.2 Campaign detail — MailForge `/leadgen/campaigns/:id`
+The stage funnel, per-tier counts, per-source naming yield, reject reasons, a
+per-lead evidence drawer, the live log, and **the alert banner** (§6). Leads
 stream in over Realtime; no refresh needed.
+
+### 2.2a Jobs & Ops — MailForge `/leadgen/ops`
+Every job your campaigns ran, rolled up by stage with durations and cost, plus
+dead letters and proxy traffic. **Four things it deliberately does not show,
+because a browser cannot reach them** — the page lists them with the command
+that does: queue depth (`graphile_worker` is not an exposed schema), worker
+health (`/healthz` is loopback-only), registry freshness (registry-db is not in
+Supabase), and the Verifalia balance (needs credentials a browser must not
+hold). Use §2.3 and §1.1 for those.
+
+**Dead-letter requeue is still not a button** (HANDOFF §7.5) — the ops page is
+read-only about dead letters and says so. Requeue from the fleet.
+
+### 2.2b Send to MailForge — on any finished campaign
+Turns the campaign into MailForge lead lists directly, mapping owner name,
+business, email, phone, website and city. Three rules it enforces, and they are
+not optional:
+
+- **Only Tier A and Tier B cross. Tier C never does** — it names a person with
+  no address that reaches them.
+- **Catch-all rows always land in a separate list suffixed "(catch-all)"**, never
+  mixed into the main one. §1.6 says to segment Tier B away from Tier A in any
+  send; this is that rule enforced instead of remembered.
+- Addresses already in a MailForge list, or on its suppression list, are skipped —
+  and the counts are shown **before** you confirm.
+
+### 2.2c Exports — MailForge `/leadgen/exports`
+The same two CSVs as §1.6, for every finished campaign in one place.
 
 ### 2.3 Worker health — `:9100/healthz` and `:9100/metrics`
 Every worker serves both on `METRICS_PORT`, loopback only. `/metrics` is
