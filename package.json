@@ -1,7 +1,9 @@
 {
   "name": "leadgen-web",
-  "private": true,
-  "version": "0.0.1",
+  "private": false,
+  "version": "1.0.0",
+  "author": "Luke Arian",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
